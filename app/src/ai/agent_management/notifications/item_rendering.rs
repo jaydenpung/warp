@@ -360,18 +360,32 @@ fn render_clamped_title(title: &str, expanded: bool, appearance: &Appearance) ->
         COLLAPSED_MAX_CHARS
     };
 
-    appearance
-        .ui_builder()
-        .wrappable_text(truncate_text(title, max), true)
-        .with_style(UiComponentStyles {
-            font_size: Some(14.),
-            font_weight: Some(Weight::Semibold),
-            font_color: Some(theme.main_text_color(theme.surface_1()).into()),
-            font_family_id: Some(appearance.ui_font_family()),
-            ..Default::default()
-        })
-        .build()
-        .finish()
+    let line = |text: String| {
+        appearance
+            .ui_builder()
+            .wrappable_text(text, true)
+            .with_style(UiComponentStyles {
+                font_size: Some(14.),
+                font_weight: Some(Weight::Semibold),
+                font_color: Some(theme.main_text_color(theme.surface_1()).into()),
+                font_family_id: Some(appearance.ui_font_family()),
+                ..Default::default()
+            })
+            .build()
+            .finish()
+    };
+
+    let truncated = truncate_text(title, max);
+    // Titles may carry an explicit two-line form ("Group\nTab"); render each line
+    // separately since wrappable_text soft-wraps but doesn't honor a hard '\n'.
+    if !truncated.contains('\n') {
+        return line(truncated);
+    }
+    let mut column = Flex::column().with_cross_axis_alignment(CrossAxisAlignment::Start);
+    for part in truncated.split('\n') {
+        column.add_child(line(part.to_string()));
+    }
+    column.finish()
 }
 
 /// Renders the message text, truncated based on expanded state.

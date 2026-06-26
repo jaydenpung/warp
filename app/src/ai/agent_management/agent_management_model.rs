@@ -157,14 +157,16 @@ impl AgentNotificationsModel {
                     );
                 }
                 CLIAgentSessionStatus::Success => {
-                    let title = session_context
-                        .display_title()
-                        .unwrap_or_else(|| format!("{} completed", agent.display_name()));
+                    let metadata = TerminalViewMetadata::lookup(*terminal_view_id, ctx);
+                    let title = metadata.group_tab_title().unwrap_or_else(|| {
+                        session_context
+                            .display_title()
+                            .unwrap_or_else(|| format!("{} completed", agent.display_name()))
+                    });
                     let message = match agent {
                         CLIAgent::Codex => "Notification from Codex",
                         _ => "Task completed.",
                     };
-                    let metadata = TerminalViewMetadata::lookup(*terminal_view_id, ctx);
                     self.add_notification(
                         title,
                         message.to_owned(),
@@ -181,10 +183,12 @@ impl AgentNotificationsModel {
                     );
                 }
                 CLIAgentSessionStatus::Blocked { message } => {
-                    let title = session_context
-                        .display_title()
-                        .unwrap_or_else(|| format!("{} needs attention", agent.display_name()));
                     let metadata = TerminalViewMetadata::lookup(*terminal_view_id, ctx);
+                    let title = metadata.group_tab_title().unwrap_or_else(|| {
+                        session_context
+                            .display_title()
+                            .unwrap_or_else(|| format!("{} needs attention", agent.display_name()))
+                    });
                     self.add_notification(
                         title,
                         message
@@ -550,6 +554,8 @@ fn window_and_tab_idx_id_for_conversation(
 struct TerminalViewMetadata {
     is_ambient: bool,
     branch: Option<String>,
+    group_name: Option<String>,
+    tab_name: Option<String>,
 }
 
 impl TerminalViewMetadata {
@@ -558,14 +564,56 @@ impl TerminalViewMetadata {
             return Self {
                 is_ambient: false,
                 branch: None,
+                group_name: None,
+                tab_name: None,
             };
         };
         let view = terminal_view.as_ref(app);
+        let (group_name, tab_name) = match lookup_group_and_tab(terminal_view_id, app) {
+            Some((group, tab)) => (Some(group), Some(tab)),
+            None => (None, None),
+        };
         Self {
             is_ambient: view.is_ambient_agent_session(app),
             branch: view.current_git_branch(app),
+            group_name,
+            tab_name,
         }
     }
+
+    /// Notification title showing the tab's group and name on two lines, e.g.
+    /// `"Ungrouped\nmy-tab"`. `None` when the owning tab couldn't be resolved.
+    fn group_tab_title(&self) -> Option<String> {
+        match (&self.group_name, &self.tab_name) {
+            (Some(group), Some(tab)) => Some(format!("{group}\n{tab}")),
+            _ => None,
+        }
+    }
+}
+
+/// Resolves the group name and tab name of the tab that owns `terminal_view_id`.
+/// The group name falls back to "Ungrouped" when the tab is not in a group (and
+/// to "New Group" for an as-yet-unnamed group, matching the tab-strip default).
+fn lookup_group_and_tab(terminal_view_id: EntityId, app: &AppContext) -> Option<(String, String)> {
+    for (_, workspace_handle) in WorkspaceRegistry::as_ref(app).all_workspaces(app) {
+        let workspace = workspace_handle.as_ref(app);
+        for tab in &workspace.tabs {
+            let pane_group = tab.pane_group.as_ref(app);
+            if pane_group.contains_terminal_view(terminal_view_id, app) {
+                let tab_name = pane_group.display_title(app);
+                let group_name = match tab.group_id {
+                    Some(group_id) => workspace
+                        .tab_groups
+                        .get(&group_id)
+                        .and_then(|group| group.name.clone())
+                        .unwrap_or_else(|| "New Group".to_string()),
+                    None => "Ungrouped".to_string(),
+                };
+                return Some((group_name, tab_name));
+            }
+        }
+    }
+    None
 }
 
 fn find_terminal_view_by_id(
