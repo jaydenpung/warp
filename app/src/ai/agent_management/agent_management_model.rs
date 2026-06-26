@@ -594,7 +594,10 @@ impl TerminalViewMetadata {
 /// Resolves the group name and tab name of the tab that owns `terminal_view_id`.
 /// The group name falls back to "Ungrouped" when the tab is not in a group (and
 /// to "New Group" for an as-yet-unnamed group, matching the tab-strip default).
-fn lookup_group_and_tab(terminal_view_id: EntityId, app: &AppContext) -> Option<(String, String)> {
+pub(crate) fn lookup_group_and_tab(
+    terminal_view_id: EntityId,
+    app: &AppContext,
+) -> Option<(String, String)> {
     for (_, workspace_handle) in WorkspaceRegistry::as_ref(app).all_workspaces(app) {
         let workspace = workspace_handle.as_ref(app);
         for tab in &workspace.tabs {

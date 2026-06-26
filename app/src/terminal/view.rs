@@ -13323,7 +13323,7 @@ impl TerminalView {
             return;
         }
 
-        let title = session_context
+        let prompt_title = session_context
             .query
             .as_deref()
             .filter(|q| !q.is_empty())
@@ -13336,16 +13336,42 @@ impl TerminalView {
             session_context.response.clone().unwrap_or_default()
         };
 
-        let trigger = if matches!(status, CLIAgentSessionStatus::Blocked { .. }) {
+        let is_blocked = matches!(status, CLIAgentSessionStatus::Blocked { .. });
+        let trigger = if is_blocked {
             NotificationsTrigger::NeedsAttention
         } else {
             NotificationsTrigger::AgentTaskCompleted(true)
         };
+
+        // Title the notification by the owning tab ("Group / Tab") with a concise
+        // status body, instead of the raw prompt + output. Fall back to the
+        // prompt-based title if the tab can't be resolved.
+        let (title, notification_override) =
+            match crate::ai::agent_management::lookup_group_and_tab(self.view_id, ctx) {
+                Some((group, tab)) => {
+                    let body = if is_blocked {
+                        "Waiting for input.".to_string()
+                    } else {
+                        "Task completed.".to_string()
+                    };
+                    let final_title = format!("{group} / {tab}");
+                    (
+                        final_title.clone(),
+                        Some(BlockNotification {
+                            title: final_title,
+                            body,
+                        }),
+                    )
+                }
+                None => (prompt_title, None),
+            };
+
         self.send_agent_desktop_notification_or_show_banner(
             trigger,
             title,
             description,
             Some(NotificationAgentVariant::CLIAgent((*agent).into())),
+            notification_override,
             ctx,
         );
     }
@@ -15738,6 +15764,7 @@ impl TerminalView {
             block_summary.title,
             block_summary.description,
             Some(NotificationAgentVariant::Oz),
+            None,
             ctx,
         );
     }
@@ -15750,6 +15777,9 @@ impl TerminalView {
         title: String,
         description: String,
         agent_variant: Option<NotificationAgentVariant>,
+        // When `Some`, this fully-formatted notification is used as-is instead of
+        // running `title`/`description` through the command-style formatter.
+        notification_override: Option<BlockNotification>,
         ctx: &mut ViewContext<Self>,
     ) {
         let notification_settings = SessionSettings::as_ref(ctx).notifications.value().clone();
@@ -15776,7 +15806,8 @@ impl TerminalView {
                 } else if !notification_settings.is_needs_attention_enabled {
                     return;
                 }
-                let notification_content = trigger.create_notification_content(title, description);
+                let notification_content = notification_override
+                    .unwrap_or_else(|| trigger.create_notification_content(title, description));
                 ctx.emit(Event::SendNotification(notification_content));
                 send_telemetry_from_ctx!(
                     TelemetryEvent::NotificationSent {
