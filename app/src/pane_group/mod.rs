@@ -1660,6 +1660,17 @@ impl PaneGroup {
                     ctx,
                 );
 
+                // If this pane was running a Claude Code session before restart,
+                // resume it via the pending-command queue so it runs at the first
+                // ready prompt as a normal command block (rather than from
+                // ~/.zshrc, which blocks the shell-start handshake).
+                #[cfg(target_os = "macos")]
+                if let Some(cmd) = claude_resume_command_for_pane(uuid.0.as_slice()) {
+                    terminal_view.update(ctx, |terminal, ctx| {
+                        terminal.set_pending_command_queue(vec![cmd], ctx);
+                    });
+                }
+
                 let terminal_view_id = terminal_view.id();
 
                 let pane_data = TerminalPane::new(
@@ -8054,4 +8065,50 @@ impl View for PaneGroup {
         _ctx: &mut ViewContext<Self>,
     ) {
     }
+}
+
+/// Looks up the Claude Code session recorded for a terminal pane (by its stable
+/// session uuid) and returns a shell command that resumes it under the right
+/// account, or `None` if there is no valid recorded session.
+///
+/// Mapping files are written by the per-account Claude Code hook
+/// (`~/.warp-claude/record.sh`), keyed by `WARP_TERMINAL_SESSION_UUID` (the hex
+/// of the pane's session uuid). Replaying the resume command on restore lets a
+/// restored tab automatically reopen the exact conversation it was running —
+/// even with multiple sessions in the same directory.
+#[cfg(target_os = "macos")]
+fn claude_resume_command_for_pane(session_uuid: &[u8]) -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let map_path = std::path::Path::new(&home)
+        .join(".warp-claude-sessions")
+        .join(hex::encode(session_uuid));
+    let contents = std::fs::read_to_string(map_path).ok()?;
+
+    let mut config_dir: Option<&str> = None;
+    let mut session_id: Option<&str> = None;
+    for line in contents.lines() {
+        if let Some(v) = line.strip_prefix("CLAUDE_CONFIG_DIR=") {
+            config_dir = Some(v.trim());
+        } else if let Some(v) = line.strip_prefix("SESSION_ID=") {
+            session_id = Some(v.trim());
+        }
+    }
+    let config_dir = config_dir.filter(|s| !s.is_empty())?;
+    let session_id = session_id.filter(|s| !s.is_empty())?;
+
+    // Only resume if the transcript still exists, so we never inject a command
+    // that errors out: <config_dir>/projects/<encoded-cwd>/<session_id>.jsonl
+    let projects = std::path::Path::new(config_dir).join("projects");
+    let transcript = format!("{session_id}.jsonl");
+    let still_exists = std::fs::read_dir(&projects)
+        .ok()?
+        .flatten()
+        .any(|entry| entry.path().join(&transcript).is_file());
+    if !still_exists {
+        return None;
+    }
+
+    Some(format!(
+        "CLAUDE_CONFIG_DIR='{config_dir}' claude --resume '{session_id}'"
+    ))
 }
