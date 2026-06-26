@@ -24,6 +24,8 @@ fn main() -> Result<()> {
     if cfg!(debug_assertions) {
         state = state.with_additional_features(warp_core::features::DEBUG_FLAGS);
     }
+    // Enable manual tab grouping in all warp-oss builds (debug and release).
+    state = state.with_additional_features(&[warp_core::features::FeatureFlag::GroupedTabs]);
     ChannelState::set(state);
 
     warp::run()
