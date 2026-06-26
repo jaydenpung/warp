@@ -114,8 +114,8 @@ const DETAIL_SIDECAR_CORNER_RADIUS: f32 = 4.;
 /// Fixed height of the metadata row (line 3 in expanded mode). Matches the passive badge height
 /// so the row doesn't resize when badges are toggled.
 const METADATA_ROW_HEIGHT: f32 = BADGE_ICON_SIZE + 2.;
-const TAB_COLOR_OPACITY: Opacity = 15;
-const TAB_COLOR_HOVER_OPACITY: Opacity = 50;
+const TAB_COLOR_OPACITY: Opacity = 50;
+const TAB_COLOR_HOVER_OPACITY: Opacity = 80;
 
 // Circular icon constants
 const ICON_WITH_STATUS_GAP: f32 = 8.;
