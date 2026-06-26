@@ -104,6 +104,9 @@ const ROW_CORNER_RADIUS: f32 = 4.;
 const TAB_GROUP_MEMBER_INDENT: f32 = 12.;
 const TAB_GROUP_ICON_SIZE: f32 = 16.;
 const TAB_GROUP_CONTENT_INSET: f32 = 4.;
+/// Width of the colored vertical bar on the left edge of a tab group, used to
+/// visually distinguish groups from ungrouped tabs and from each other.
+const TAB_GROUP_SPINE_WIDTH: f32 = 3.;
 const BADGE_ICON_SIZE: f32 = 12.;
 const DETAIL_SIDECAR_DEFAULT_WIDTH: f32 = 320.;
 const DETAIL_SIDECAR_MIN_WIDTH: f32 = 240.;
@@ -2984,11 +2987,22 @@ fn render_grouped_tab_container(
             }
         }
 
+        // Persistent faint card background so each group reads as one block,
+        // intensified when hovered or holding the active tab.
         let background = if hover_state.is_hovered() || any_member_active {
-            internal_colors::fg_overlay_1(theme)
+            internal_colors::fg_overlay_2(theme)
         } else {
-            ThemeFill::Solid(ColorU::transparent_black())
+            internal_colors::fg_overlay_1(theme)
         };
+
+        // Colored left spine in the group's color (falling back to the theme
+        // accent), so groups are easy to distinguish from ungrouped tabs and
+        // from one another.
+        let spine_color: ColorU = group
+            .color
+            .resolve(None)
+            .map(|c| c.to_ansi_color(&theme.terminal_colors().normal).into())
+            .unwrap_or_else(|| theme.accent().into());
 
         // Pane view: uniform `GROUP_HORIZONTAL_PADDING` matches ungrouped-tab body padding.
         // Tab view: only apply bottom padding when expanded so a collapsed group has no trailing band.
@@ -3003,6 +3017,10 @@ fn render_grouped_tab_container(
             .with_padding(padding)
             .with_background(background)
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)))
+            .with_border(
+                Border::left(TAB_GROUP_SPINE_WIDTH)
+                    .with_border_fill(ThemeFill::Solid(spine_color)),
+            )
             .finish()
     })
     // Right-click on group chrome (not member rows) opens the group menu.
