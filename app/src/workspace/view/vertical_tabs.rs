@@ -114,8 +114,8 @@ const DETAIL_SIDECAR_CORNER_RADIUS: f32 = 4.;
 /// Fixed height of the metadata row (line 3 in expanded mode). Matches the passive badge height
 /// so the row doesn't resize when badges are toggled.
 const METADATA_ROW_HEIGHT: f32 = BADGE_ICON_SIZE + 2.;
-const TAB_COLOR_OPACITY: Opacity = 50;
-const TAB_COLOR_HOVER_OPACITY: Opacity = 80;
+const TAB_COLOR_OPACITY: Opacity = 30;
+const TAB_COLOR_HOVER_OPACITY: Opacity = 50;
 
 // Circular icon constants
 const ICON_WITH_STATUS_GAP: f32 = 8.;
@@ -437,8 +437,8 @@ fn render_pane_row_element(
         }
 
         let pane: Box<dyn Element> = container
-            .with_border(Border::all(1.).with_border_fill(if is_selected {
-                internal_colors::fg_overlay_3(theme).into()
+            .with_border(Border::all(2.).with_border_fill(if is_selected {
+                ThemeFill::Solid(theme.foreground().into()).into()
             } else {
                 ElementFill::None
             }))
@@ -4133,7 +4133,14 @@ fn render_terminal_row_content(
     app: &AppContext,
 ) -> Box<dyn Element> {
     let theme = appearance.theme();
-    let main_text_color = theme.main_text_color(theme.background());
+    // Brighten the selected tab's text so the active tab stands out alongside
+    // the accent selection ring.
+    let is_selected = props.is_active_tab && props.is_focused;
+    let main_text_color = if is_selected {
+        theme.foreground()
+    } else {
+        theme.main_text_color(theme.background())
+    };
     let sub_text_color = theme.sub_text_color(theme.background());
     let primary_info = *TabSettings::as_ref(app).vertical_tabs_primary_info.value();
 
