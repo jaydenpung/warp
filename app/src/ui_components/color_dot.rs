@@ -18,9 +18,9 @@ const COLOR_DOT_SIZE: f32 = 16.;
 pub(crate) const TAB_COLOR_OPTIONS: [AnsiColorIdentifier; 6] = [
     AnsiColorIdentifier::Red,
     AnsiColorIdentifier::Green,
+    AnsiColorIdentifier::Magenta,
     AnsiColorIdentifier::Yellow,
     AnsiColorIdentifier::Blue,
-    AnsiColorIdentifier::Magenta,
     AnsiColorIdentifier::Cyan,
 ];
 
