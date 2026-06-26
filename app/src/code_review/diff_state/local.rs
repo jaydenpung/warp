@@ -968,6 +968,17 @@ impl LocalDiffStateModel {
             );
             self.computing_metadata_abort_handle = Some(abort_handle);
             self.state = InternalDiffState::Loading;
+
+            // Also load the actual file diffs now that a repository is active.
+            // `on_open` calls `load_diffs_for_current_repo` to start this, but
+            // when the repository is detected *after* `on_open` runs — e.g. a
+            // freshly created diff model whose async git detection finishes late,
+            // as happens when switching the code review panel to a repo that
+            // wasn't already watched — that earlier call no-ops (no repository
+            // yet). Without this, the panel loads metadata but stays stuck on
+            // "Loading open changes". The metadata refresh being enabled implies
+            // the pane is open, so loading diffs here is the right behavior.
+            self.load_diffs_for_current_repo(false, true, ctx);
         }
 
         let (repository_update_tx, repository_update_rx) = async_channel::unbounded();

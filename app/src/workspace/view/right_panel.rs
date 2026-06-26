@@ -3,14 +3,13 @@ use std::sync::Arc;
 
 use dunce::canonicalize;
 use itertools::Itertools;
-use pathfinder_color::ColorU;
 use warp_core::features::FeatureFlag;
 use warp_core::ui::Icon;
 use warp_util::path::LineAndColumnArg;
 use warpui::elements::{
-    resizable_state_handle, ChildAnchor, ChildView, Clipped, ConstrainedBox, Container,
+    resizable_state_handle, ChildView, Clipped, ConstrainedBox, Container,
     CrossAxisAlignment, DragBarSide, Element, Empty, Flex, MainAxisAlignment, MainAxisSize,
-    MouseStateHandle, ParentElement, PositionedElementAnchor, Resizable, ResizableStateHandle,
+    MouseStateHandle, ParentElement, Resizable, ResizableStateHandle,
     Shrinkable, Text,
 };
 use warpui::fonts::{Properties, Weight};
@@ -23,9 +22,8 @@ use warpui::{
 };
 
 use crate::ai::agent::AgentReviewCommentBatch;
-use crate::appearance::{Appearance, AppearanceEvent};
+use crate::appearance::Appearance;
 use crate::code::buffer_location::LocalOrRemotePath;
-use crate::code_review::code_review_header::HEADER_BUTTON_PADDING;
 #[cfg(feature = "local_fs")]
 use crate::code_review::code_review_view::CodeReviewAction;
 use crate::code_review::code_review_view::{
@@ -55,7 +53,7 @@ use crate::util::path::{display_name_with_host, display_path_with_host};
 use crate::view_components::action_button::{ActionButton, PaneHeaderTheme};
 #[cfg(feature = "local_fs")]
 use crate::view_components::action_button::{NakedTheme, TooltipAlignment};
-use crate::view_components::{Dropdown, DropdownItem};
+use crate::view_components::{DropdownItem, FilterableDropdown};
 use crate::workspace::view::TOGGLE_RIGHT_PANEL_BINDING_NAME;
 use crate::workspace::WorkspaceAction;
 
@@ -177,7 +175,7 @@ impl ReviewActionTargetProvider for RightPanelReviewActionTargetProvider {
 }
 
 struct CodeReviewState {
-    dropdown: ViewHandle<Dropdown<RightPanelAction>>,
+    dropdown: ViewHandle<FilterableDropdown<RightPanelAction>>,
     available_repos: Vec<LocalOrRemotePath>,
     /// The repository path of the focused terminal
     focused_repo_path: Option<LocalOrRemotePath>,
@@ -193,52 +191,54 @@ struct CodeReviewSessionEnv {
     is_wsl: bool,
 }
 
-/// Resolve the repo-switcher dropdown's text color from the current theme.
-/// Kept as a free function so the construction site and the
-/// `AppearanceEvent::ThemeChanged` subscription compute the exact same color.
-fn repo_dropdown_font_color(appearance: &Appearance) -> ColorU {
-    appearance
-        .theme()
-        .sub_text_color(appearance.theme().background())
-        .into_solid()
+/// Max width of the repo-switcher dropdown's top bar and menu, in px.
+const REPO_DROPDOWN_MAX_WIDTH: f32 = 300.;
+
+/// Scans `dir` for immediate sub-folders that are git repositories and returns
+/// them as local paths, sorted alphabetically (case-insensitive) by folder
+/// name. A directory is treated as a repo when it contains a `.git` entry
+/// (directory, file for worktrees/submodules, or `.git` symlink). Errors
+/// reading the directory yield an empty list rather than failing.
+#[cfg(feature = "local_fs")]
+fn git_repos_in(dir: &Path) -> Vec<LocalOrRemotePath> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+
+    let mut repos: Vec<LocalOrRemotePath> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join(".git").exists())
+        .map(LocalOrRemotePath::Local)
+        .collect();
+
+    repos.sort_by_key(|repo| {
+        repo.file_name()
+            .map(|name| name.to_lowercase())
+            .unwrap_or_default()
+    });
+    repos
 }
 
 impl CodeReviewState {
     pub fn new(ctx: &mut ViewContext<RightPanelView>) -> Self {
         CodeReviewState {
             dropdown: ctx.add_typed_action_view(|ctx| {
-                let (font_color, ui_font_size) = {
-                    let appearance = Appearance::as_ref(ctx);
-                    (
-                        repo_dropdown_font_color(appearance),
-                        appearance.ui_font_size(),
-                    )
-                };
-                let mut dropdown = Dropdown::new(ctx);
-                dropdown.set_menu_position(
-                    PositionedElementAnchor::BottomRight,
-                    ChildAnchor::TopRight,
-                    ctx,
-                );
+                // Use a `FilterableDropdown` so users can type to search when the
+                // parent workspace folder holds many sibling repos. It manages its
+                // own theming (re-reads `Appearance` on render), so no font-color
+                // subscription is needed here.
+                let mut dropdown = FilterableDropdown::new(ctx);
                 dropdown.set_main_axis_size(MainAxisSize::Min, ctx);
-                dropdown.set_font_color(font_color, ctx);
-                dropdown.set_font_size(ui_font_size, ctx);
                 dropdown.set_vertical_margin(0., ctx);
-                dropdown.set_top_bar_height(warp_core::ui::icons::ICON_DIMENSIONS, ctx);
-                dropdown.set_padding(HEADER_BUTTON_PADDING, ctx);
-
-                // The font color above is derived from the active theme and
-                // cached inside the dropdown. Without this subscription, the
-                // cached value goes stale across light/dark switches and the
-                // header label becomes unreadable on the new background
-                // (e.g. white-on-white in light mode after starting in dark).
-                ctx.subscribe_to_model(&Appearance::handle(ctx), |dropdown, _, event, ctx| {
-                    if matches!(event, AppearanceEvent::ThemeChanged) {
-                        let font_color = repo_dropdown_font_color(Appearance::as_ref(ctx));
-                        dropdown.set_font_color(font_color, ctx);
-                    }
-                });
-
+                // Keep the default top-bar height: forcing it down to
+                // ICON_DIMENSIONS (24px) clips the selected-repo label out of the
+                // closed bar, leaving only the chevron visible.
+                dropdown.set_top_bar_max_width(REPO_DROPDOWN_MAX_WIDTH);
+                dropdown.set_menu_width(REPO_DROPDOWN_MAX_WIDTH, ctx);
+                // No top-bar placeholder: the closed bar should display the
+                // currently selected repo. (The inner search field has its own
+                // "Search" placeholder when the dropdown is expanded.)
                 dropdown
             }),
             available_repos: vec![],
@@ -262,6 +262,12 @@ impl CodeReviewState {
         repos: Vec<LocalOrRemotePath>,
         ctx: &mut ViewContext<RightPanelView>,
     ) {
+        // Expand the list with child git repos nested directly inside each known
+        // repo (i.e. the folders inside e.g. `~/work/playhq`), so the user can
+        // switch the diff to any repo under the workspace folder without first
+        // cd-ing into it from a terminal.
+        let repos = Self::augment_with_child_repos(repos);
+
         let should_clear = self
             .selected_repo_path
             .as_ref()
@@ -280,6 +286,40 @@ impl CodeReviewState {
                 self.set_selected_repo(first_repo.clone(), ctx);
             }
         }
+    }
+
+    /// Returns `repos` with any child git repositories appended.
+    ///
+    /// For each local repo in `repos` we scan its own directory for immediate
+    /// sub-folders that are themselves git repos and add the ones not already
+    /// present. Original entries keep their position (and therefore the
+    /// auto-selected default), with discovered children appended in alphabetical
+    /// order. Remote repos are passed through untouched (we can't list a remote
+    /// directory synchronously here).
+    #[cfg(feature = "local_fs")]
+    fn augment_with_child_repos(repos: Vec<LocalOrRemotePath>) -> Vec<LocalOrRemotePath> {
+        use std::collections::HashSet;
+
+        let mut seen: HashSet<LocalOrRemotePath> = repos.iter().cloned().collect();
+        let mut result = repos.clone();
+
+        // Track scanned directories so repos sharing a directory only scan once.
+        let mut scanned_dirs: HashSet<PathBuf> = HashSet::new();
+        for repo in &repos {
+            let Some(dir) = repo.to_local_path().map(Path::to_path_buf) else {
+                continue;
+            };
+            if !scanned_dirs.insert(dir.clone()) {
+                continue;
+            }
+            for child in git_repos_in(&dir) {
+                if seen.insert(child.clone()) {
+                    result.push(child);
+                }
+            }
+        }
+
+        result
     }
 
     #[cfg(not(feature = "local_fs"))]
@@ -350,7 +390,7 @@ impl CodeReviewState {
     #[cfg_attr(not(feature = "local_fs"), allow(dead_code))]
     fn update_repo_dropdown(&mut self, ctx: &mut ViewContext<RightPanelView>) {
         // Collect data before borrowing mutably
-        let (items, selected_display_name) = {
+        let (items, selected_repo) = {
             let items: Vec<DropdownItem<RightPanelAction>> = self
                 .available_repos
                 .iter()
@@ -368,20 +408,24 @@ impl CodeReviewState {
                 })
                 .collect();
 
-            let selected_display_name = self
-                .selected_repo_path
-                .as_ref()
-                .and_then(|selected| self.get_repo_display_name(selected, ctx));
-
-            (items, selected_display_name)
+            (items, self.selected_repo_path.clone())
         };
 
         // Now update the dropdown
         if !items.is_empty() {
             self.dropdown.update(ctx, |dropdown, ctx| {
                 dropdown.set_items(items, ctx);
-                if let Some(display_name) = selected_display_name {
-                    dropdown.set_selected_by_name(display_name, ctx);
+                // Match by the action (carrying the exact path) rather than by
+                // label, so the closed bar reflects the selected repo even when
+                // two repos share a display name.
+                if let Some(selected) = selected_repo {
+                    dropdown.set_selected_by_action(
+                        RightPanelAction::SelectRepo {
+                            repo_path: selected,
+                            from_dropdown: true,
+                        },
+                        ctx,
+                    );
                 }
             });
         }
@@ -1217,10 +1261,19 @@ impl RightPanelView {
         let has_active_repos = if repo_path.is_remote() {
             FeatureFlag::RemoteCodeReview.is_enabled()
         } else {
-            self.working_directories_model
+            let is_navigated_repo = self
+                .working_directories_model
                 .as_ref(ctx)
                 .most_recent_repositories_for_pane_group(pane_group_id)
-                .is_some_and(|mut repos| repos.any(|r| &r == repo_path))
+                .is_some_and(|mut repos| repos.any(|r| &r == repo_path));
+            // Also allow repos surfaced in the switcher dropdown (sibling repos
+            // discovered under the parent workspace folder) even if no terminal
+            // in this pane group has cd-ed into them yet.
+            let is_available_repo = self
+                .code_review_state
+                .as_ref()
+                .is_some_and(|state| state.available_repos.contains(repo_path));
+            is_navigated_repo || is_available_repo
         };
 
         if !has_active_repos {
@@ -1851,6 +1904,20 @@ impl TypedActionView for RightPanelView {
                     }
 
                     ctx.notify();
+                }
+
+                // The filterable dropdown clears its own displayed selection when
+                // its menu closes after a pick, and we can't refresh it
+                // synchronously here (that re-enters the dropdown while it is
+                // mid-update and panics with "Circular view update"). Re-sync the
+                // closed top bar to the new selection on the next tick so the
+                // button shows the repo the user just chose.
+                if *from_dropdown {
+                    ctx.spawn(std::future::ready(()), |me, _, ctx| {
+                        if let Some(state) = me.code_review_state.as_mut() {
+                            state.update_repo_dropdown(ctx);
+                        }
+                    });
                 }
             }
             RightPanelAction::ToggleMaximize => {

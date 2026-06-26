@@ -462,14 +462,23 @@ impl WorkingDirectoriesModel {
         view: ViewHandle<CodeReviewView>,
     ) {
         let pane_group_views = self.code_review_views.entry(pane_group_id).or_default();
-        pane_group_views.insert(repo_path, view);
+        pane_group_views.insert(repo_path.clone(), view);
 
         // Remove any inactive code reviews here. This allows these to be garbage collected.
-        self.remove_inactive_code_reviews(pane_group_id);
+        // Keep the view we just stored: the code review panel can be pointed at a repo that
+        // has no terminal in this pane group (e.g. a sibling/child repo picked from the repo
+        // dropdown), and that view must survive even though it isn't terminal-backed.
+        self.remove_inactive_code_reviews(pane_group_id, Some(&repo_path));
     }
 
-    /// Remove any code review view state that is not active in any of the terminal views that belong to this pane group.
-    fn remove_inactive_code_reviews(&mut self, pane_group_id: EntityId) {
+    /// Remove any code review view state that is not active in any of the terminal views that
+    /// belong to this pane group. `keep` is always retained even when it has no terminal — it is
+    /// the view that was just stored / is currently selected in the code review panel.
+    fn remove_inactive_code_reviews(
+        &mut self,
+        pane_group_id: EntityId,
+        keep: Option<&LocalOrRemotePath>,
+    ) {
         let Some(code_review_views) = self.code_review_views.get_mut(&pane_group_id) else {
             return;
         };
@@ -478,7 +487,7 @@ impl WorkingDirectoriesModel {
             return;
         };
 
-        code_review_views.retain(|path, _| terminal_mapping.contains_key(path));
+        code_review_views.retain(|path, _| keep == Some(path) || terminal_mapping.contains_key(path));
     }
 
     /// Get an existing CodeReviewView for a specific repository in a pane group.
