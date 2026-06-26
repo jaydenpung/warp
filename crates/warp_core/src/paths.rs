@@ -267,6 +267,17 @@ fn project_dirs_for_app_id(
 /// * [`containerURLForSecurityApplicationGroupIdentifier`](https://developer.apple.com/documentation/foundation/filemanager/containerurl(forsecurityapplicationgroupidentifier:)?language=objc)
 #[cfg(target_os = "macos")]
 pub fn app_group_container_path() -> Option<PathBuf> {
+    // The shared App Group container (`2BBY89MBSN.dev.warp`) is only legitimately
+    // accessible to builds signed with Warp's team `com.apple.security.application-groups`
+    // entitlement. Builds made from source (OSS, Local) are self-signed without that
+    // entitlement, so touching the team's group container is cross-app data access:
+    // on macOS 15+ it triggers the "would like to access data from other apps" prompt
+    // on every launch. Skip it for those channels and fall back to the regular,
+    // per-app data directory.
+    if matches!(ChannelState::channel(), Channel::Oss | Channel::Local) {
+        return None;
+    }
+
     use std::sync::LazyLock;
     static CONTAINER_PATH: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
         use objc2_foundation::{NSFileManager, NSString};
