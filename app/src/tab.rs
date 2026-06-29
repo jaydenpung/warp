@@ -227,7 +227,6 @@ impl TabData {
         for section_items in [
             self.pin_menu_items(index),
             self.tab_group_menu_items(index, tab_groups),
-            self.claude_session_menu_items(index, ctx),
             self.session_sharing_menu_items(index, ctx),
             self.copy_metadata_menu_items(pane_name_target, ctx),
             self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
@@ -562,74 +561,6 @@ impl TabData {
         vec![MenuItemFields::new("Save as new config")
             .with_on_select_action(WorkspaceAction::SaveCurrentTabAsNewConfig(index))
             .into_item()]
-    }
-
-    /// Per-tab "Resume Claude session" entries: lists recent Claude Code sessions
-    /// for the focused terminal's working directory so the user can reopen any
-    /// past conversation, not just the most recent one. macOS-only, matching the
-    /// auto-resume-on-restore path.
-    #[cfg(target_os = "macos")]
-    fn claude_session_menu_items(
-        &self,
-        index: usize,
-        ctx: &AppContext,
-    ) -> Vec<MenuItem<WorkspaceAction>> {
-        let Some(terminal_view) = self.pane_group.as_ref(ctx).focused_session_view(ctx) else {
-            return vec![];
-        };
-        let Some(cwd) = terminal_view.as_ref(ctx).pwd_if_local(ctx) else {
-            return vec![];
-        };
-        let sessions = crate::pane_group::recent_claude_sessions_for_dir(&cwd, 6);
-        if sessions.is_empty() {
-            return vec![];
-        }
-
-        let now = std::time::SystemTime::now();
-        let mut menu_items = vec![MenuItemFields::new("Resume Claude session")
-            .with_disabled(true)
-            .into_item()];
-        for entry in sessions {
-            let secs = now
-                .duration_since(entry.modified)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let relative = if secs < 60 {
-                "just now".to_string()
-            } else if secs < 3_600 {
-                format!("{}m ago", secs / 60)
-            } else if secs < 86_400 {
-                format!("{}h ago", secs / 3_600)
-            } else {
-                format!("{}d ago", secs / 86_400)
-            };
-            let title = if entry.title.chars().count() > 32 {
-                format!("{}…", entry.title.chars().take(31).collect::<String>())
-            } else {
-                entry.title.clone()
-            };
-            let label = format!("{title}  ·  {relative}");
-            let command =
-                crate::pane_group::claude_resume_command(&entry.config_dir, &entry.session_id);
-            menu_items.push(
-                MenuItemFields::new(label)
-                    .with_on_select_action(WorkspaceAction::ResumeClaudeSession {
-                        tab_index: index,
-                        command,
-                    })
-                    .into_item(),
-            );
-        }
-        menu_items
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn claude_session_menu_items(
-        &self,
-        _index: usize,
-        _ctx: &AppContext,
-    ) -> Vec<MenuItem<WorkspaceAction>> {
-        vec![]
     }
 
     /// Pin/unpin entry for the per-tab right-click menu.

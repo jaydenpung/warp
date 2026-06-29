@@ -133,9 +133,6 @@ pub enum WorkspaceAction {
     /// Focus the next tab (cyclically after the active one) whose agent is blocked
     /// waiting for user input.
     FocusNextWaitingTab,
-    /// Inject a `claude --resume` command into the focused terminal of the given
-    /// tab, resuming a past Claude Code session picked from the tab menu.
-    ResumeClaudeSession { tab_index: usize, command: String },
     CyclePrevSession,
     CycleNextSession,
     MoveActiveTabLeft,
@@ -1181,8 +1178,7 @@ impl WorkspaceAction {
             | ShowHandoffEnvironmentCreationModal
             | ShowCloudModeV2EnvironmentCreationModal
             | OpenCreateAuthSecretModal { .. }
-            | OpenNetworkLogPane
-            | ResumeClaudeSession { .. } => false,
+            | OpenNetworkLogPane => false,
             #[cfg(debug_assertions)]
             ShowHoaOnboardingFlow => false,
             #[cfg(target_family = "wasm")]

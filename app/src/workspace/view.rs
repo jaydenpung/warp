@@ -11637,28 +11637,6 @@ impl Workspace {
         }
     }
 
-    /// Injects a resume command into the focused terminal of `tab_index`. Used by
-    /// the per-tab "Resume Claude session" menu to reopen a past conversation.
-    fn resume_claude_session(
-        &mut self,
-        tab_index: usize,
-        command: String,
-        ctx: &mut ViewContext<Self>,
-    ) {
-        let terminal_view = {
-            let app: &AppContext = &**ctx;
-            self.tabs
-                .get(tab_index)
-                .and_then(|tab| tab.pane_group.as_ref(app).focused_session_view(app))
-        };
-        let Some(terminal_view) = terminal_view else {
-            return;
-        };
-        terminal_view.update(ctx, |terminal, ctx| {
-            terminal.set_pending_command_queue(vec![command], ctx);
-        });
-    }
-
     /// If a closing tab is an untouched split-off child-agent tab, move its
     /// pane back to the original tab instead of closing it. Returns true if
     /// handled.
@@ -23344,9 +23322,6 @@ impl TypedActionView for Workspace {
             OpenLaunchConfigSaveModal => self.open_launch_config_save_modal(ctx),
             ActivateNextTab => self.activate_next_tab(ctx),
             FocusNextWaitingTab => self.focus_next_waiting_tab(ctx),
-            ResumeClaudeSession { tab_index, command } => {
-                self.resume_claude_session(*tab_index, command.clone(), ctx)
-            }
             ActivateLastTab => self.activate_last_tab(ctx),
             CyclePrevSession => self.cycle_prev_session(ctx),
             CycleNextSession => self.cycle_next_session(ctx),
