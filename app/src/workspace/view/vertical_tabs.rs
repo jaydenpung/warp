@@ -25,7 +25,7 @@ use warpui::elements::{
     MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
     PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
     ResizableStateHandle, SavePosition, ScrollTarget, ScrollToPositionMode, ScrollbarWidth,
-    Shrinkable, Stack, Text,
+    Shrinkable, Stack, Text, Wrap,
 };
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
@@ -38,6 +38,7 @@ use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
 use super::{render_group_member_icon_collage, select_unique_pane_kinds};
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
 use crate::ai::agent_management::AgentNotificationsModel;
+use crate::claude_pr_attribution::ClaudePrAttributionModel;
 use crate::ai::cloud_environments::CloudAmbientAgentEnvironment;
 use crate::ai::conversation_status_ui::render_status_element;
 use crate::appearance::Appearance;
@@ -4513,7 +4514,82 @@ fn render_terminal_row_content(
         .with_margin_top(2.)
         .finish(),
     );
+
+    // PRs this Claude session opened (recorded by the `gh pr create` hook,
+    // attributed to this pane's session uuid), shown as repo-name chips in a
+    // single row below the metadata line. The cwd PR — already shown on the
+    // metadata line above — is skipped so it isn't duplicated.
+    if *TabSettings::as_ref(app).vertical_tabs_show_pr_link.value() {
+        if let TypedPane::Terminal(terminal_pane) = &props.typed {
+            let uuid = terminal_pane.session_uuid();
+            let recorded = ClaudePrAttributionModel::as_ref(app).prs_for(&uuid);
+            if !recorded.is_empty() {
+                let uuid_hex = hex::encode(&uuid);
+                let cwd_pr = terminal_view.current_pull_request_url(app);
+                let entrypoint = chip_entrypoint_for_granularity(props.display_granularity);
+                // `Wrap` flows the chips onto additional rows when they don't fit
+                // the panel width, so the row grows vertically instead of clipping.
+                let mut pr_row = Wrap::row().with_spacing(4.).with_run_spacing(4.);
+                let mut any = false;
+                for url in recorded {
+                    if cwd_pr.as_deref() == Some(url.as_str()) {
+                        continue;
+                    }
+                    let label = pr_chip_label(&url);
+                    let mouse_state = chip_mouse_state(&format!("{uuid_hex}:{url}"));
+                    pr_row.add_child(render_terminal_pull_request_badge(
+                        label,
+                        url,
+                        entrypoint,
+                        mouse_state,
+                        appearance,
+                    ));
+                    any = true;
+                }
+                if any {
+                    content.add_child(Container::new(pr_row.finish()).with_margin_top(2.).finish());
+                }
+            }
+        }
+    }
+
     content.finish()
+}
+
+thread_local! {
+    /// Persistent hover/click state for session-PR chips, keyed by
+    /// `"<uuid_hex>:<url>"` so each chip keeps its state across frames. A fresh
+    /// handle per frame would break clicks and hover highlighting. Render runs on
+    /// the main thread, so a thread-local store suffices and avoids threading
+    /// panel state through the row renderer.
+    static PR_CHIP_MOUSE_STATES: std::cell::RefCell<HashMap<String, MouseStateHandle>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+fn chip_mouse_state(key: &str) -> MouseStateHandle {
+    PR_CHIP_MOUSE_STATES
+        .with(|states| states.borrow_mut().entry(key.to_owned()).or_default().clone())
+}
+
+/// Chip label from a GitHub PR URL: `https://github.com/<org>/<repo>/pull/<n>`
+/// -> `<repo>#<n>` (e.g. `fastbreak#6918`). Falls back to the `#<number>` label
+/// when it can't be parsed.
+fn pr_chip_label(url: &str) -> String {
+    url.split("github.com/")
+        .nth(1)
+        .and_then(|rest| {
+            let mut parts = rest.split('/');
+            let _org = parts.next()?;
+            let repo = parts.next().filter(|repo| !repo.is_empty())?;
+            parts.next()?; // "pull"
+            let number: String = parts
+                .next()?
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            (!number.is_empty()).then(|| format!("{repo}#{number}"))
+        })
+        .unwrap_or_else(|| terminal_pull_request_badge_label(url))
 }
 
 fn chip_entrypoint_for_granularity(

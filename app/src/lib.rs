@@ -91,6 +91,7 @@ mod user_config;
 pub mod util;
 mod view_components;
 mod vim_registers;
+mod claude_pr_attribution;
 mod voice;
 mod voltron;
 mod warp_managed_paths_watcher;
@@ -1223,6 +1224,7 @@ pub(crate) fn initialize_app(
 
     ensure_warp_watch_roots_exist();
     ctx.add_singleton_model(WarpManagedPathsWatcher::new);
+    ctx.add_singleton_model(crate::claude_pr_attribution::ClaudePrAttributionModel::new);
 
     ctx.add_singleton_model(WarpConfig::new);
     ctx.add_singleton_model(|_ctx| SettingsManager::default());

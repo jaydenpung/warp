@@ -222,7 +222,7 @@ impl TerminalPane {
     }
 
     /// The UUID that identifies this terminal session across app restarts.
-    pub(in crate::pane_group) fn session_uuid(&self) -> Vec<u8> {
+    pub(crate) fn session_uuid(&self) -> Vec<u8> {
         self.uuid.clone()
     }
 
