@@ -6984,6 +6984,25 @@ impl Workspace {
         }
     }
 
+    /// Collapses or expands every tab group at once.
+    pub fn set_all_tab_groups_collapsed(
+        &mut self,
+        collapsed: bool,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let mut changed = false;
+        for group in self.tab_groups.values_mut() {
+            if group.collapsed != collapsed {
+                group.collapsed = collapsed;
+                changed = true;
+            }
+        }
+        if changed {
+            ctx.dispatch_global_action("workspace:save_app", ());
+            ctx.notify();
+        }
+    }
+
     /// Ensures the group is expanded (not collapsed). No-op if the group does
     /// not exist or is already expanded.
     fn expand_tab_group(&mut self, group_id: TabGroupId, ctx: &mut ViewContext<Self>) {
@@ -11597,6 +11616,47 @@ impl Workspace {
             let target_index = self.tabs.len() - 1;
             self.activate_tab(target_index, ctx);
         }
+    }
+
+    /// Cyclically focus the next tab (starting just after the active one) whose
+    /// agent is blocked waiting for user input. No-op when nothing is waiting.
+    pub fn focus_next_waiting_tab(&mut self, ctx: &mut ViewContext<Self>) {
+        let n = self.tabs.len();
+        if n == 0 {
+            return;
+        }
+        let start = self.active_tab_index;
+        let target = {
+            let app: &AppContext = &**ctx;
+            (1..=n)
+                .map(|offset| (start + offset) % n)
+                .find(|&idx| vertical_tabs::tab_is_waiting_for_input(self, idx, app))
+        };
+        if let Some(idx) = target {
+            self.activate_tab(idx, ctx);
+        }
+    }
+
+    /// Injects a resume command into the focused terminal of `tab_index`. Used by
+    /// the per-tab "Resume Claude session" menu to reopen a past conversation.
+    fn resume_claude_session(
+        &mut self,
+        tab_index: usize,
+        command: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let terminal_view = {
+            let app: &AppContext = &**ctx;
+            self.tabs
+                .get(tab_index)
+                .and_then(|tab| tab.pane_group.as_ref(app).focused_session_view(app))
+        };
+        let Some(terminal_view) = terminal_view else {
+            return;
+        };
+        terminal_view.update(ctx, |terminal, ctx| {
+            terminal.set_pending_command_queue(vec![command], ctx);
+        });
     }
 
     /// If a closing tab is an untouched split-off child-agent tab, move its
@@ -23283,6 +23343,10 @@ impl TypedActionView for Workspace {
             ActivatePrevTab => self.activate_prev_tab(ctx),
             OpenLaunchConfigSaveModal => self.open_launch_config_save_modal(ctx),
             ActivateNextTab => self.activate_next_tab(ctx),
+            FocusNextWaitingTab => self.focus_next_waiting_tab(ctx),
+            ResumeClaudeSession { tab_index, command } => {
+                self.resume_claude_session(*tab_index, command.clone(), ctx)
+            }
             ActivateLastTab => self.activate_last_tab(ctx),
             CyclePrevSession => self.cycle_prev_session(ctx),
             CycleNextSession => self.cycle_next_session(ctx),
@@ -23335,6 +23399,8 @@ impl TypedActionView for Workspace {
             }
             CloseTabGroup(group_id) => self.close_tab_group(*group_id, ctx),
             ToggleTabGroupCollapsed(group_id) => self.toggle_tab_group_collapsed(*group_id, ctx),
+            CollapseAllTabGroups => self.set_all_tab_groups_collapsed(true, ctx),
+            ExpandAllTabGroups => self.set_all_tab_groups_collapsed(false, ctx),
             RenameTabGroup(group_id) => self.rename_tab_group(*group_id, ctx),
             NewTabGroupFromTab(tab_index) => self.new_tab_group_from_tab(*tab_index, ctx),
             MoveTabToGroup {

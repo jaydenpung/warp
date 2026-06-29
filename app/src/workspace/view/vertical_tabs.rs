@@ -724,6 +724,7 @@ pub(super) struct VerticalTabsPanelState {
     new_tab_hover_state: MouseStateHandle,
     new_tab_button_state: MouseStateHandle,
     pub(super) search_query: String,
+    collapse_all_button_mouse_state: MouseStateHandle,
     settings_button_mouse_state: MouseStateHandle,
     panes_segment_mouse_state: MouseStateHandle,
     tabs_segment_mouse_state: MouseStateHandle,
@@ -762,6 +763,7 @@ impl Default for VerticalTabsPanelState {
             new_tab_hover_state: Default::default(),
             new_tab_button_state: Default::default(),
             search_query: String::new(),
+            collapse_all_button_mouse_state: Default::default(),
             settings_button_mouse_state: Default::default(),
             panes_segment_mouse_state: Default::default(),
             tabs_segment_mouse_state: Default::default(),
@@ -1069,7 +1071,7 @@ fn normalize_summary_text(text: &str) -> Option<String> {
 /// pill prefix in Summary mode. Mirrors the status sources used by `render_detail_status_pill`
 /// in the detail sidecar — CLI agent sessions with rich status, Oz agent conversations, or
 /// ambient agent sessions. Returns `None` for plain terminals or conversations without status.
-fn summary_conversation_status_for_terminal(
+pub(crate) fn summary_conversation_status_for_terminal(
     terminal_view: &TerminalView,
     app: &AppContext,
 ) -> Option<ConversationStatus> {
@@ -1088,6 +1090,87 @@ fn summary_conversation_status_for_terminal(
     (has_conversation || is_ambient)
         .then(|| terminal_view.selected_conversation_status_for_display(app))
         .flatten()
+}
+
+/// Current agent status for a terminal, without requiring a rich OSC-777
+/// notification first — any tracked CLI agent session (e.g. Claude Code) reports its
+/// status immediately. Used by the "focus next waiting tab" command.
+fn current_agent_status_for_terminal(
+    terminal_view: &TerminalView,
+    app: &AppContext,
+) -> Option<ConversationStatus> {
+    if let Some(session) = CLIAgentSessionsModel::as_ref(app)
+        .session(terminal_view.id())
+        .filter(|s| !matches!(s.agent, CLIAgent::Unknown))
+    {
+        return Some(session.status.to_conversation_status());
+    }
+
+    let is_ambient = terminal_view.is_ambient_agent_session(app);
+    let has_conversation = terminal_view
+        .selected_conversation_display_title(app)
+        .is_some();
+    (has_conversation || is_ambient)
+        .then(|| terminal_view.selected_conversation_status_for_display(app))
+        .flatten()
+}
+
+/// Whether the tab at `tab_index` hosts an agent that is blocked waiting for user
+/// input. Used by the "focus next waiting tab" command to jump straight to the tab
+/// that needs attention.
+pub(crate) fn tab_is_waiting_for_input(
+    workspace: &Workspace,
+    tab_index: usize,
+    app: &AppContext,
+) -> bool {
+    let Some(tab) = workspace.tabs.get(tab_index) else {
+        return false;
+    };
+    tab.pane_group
+        .as_ref(app)
+        .terminal_views(app)
+        .iter()
+        .any(|terminal_view| {
+            matches!(
+                current_agent_status_for_terminal(terminal_view.as_ref(app), app),
+                Some(ConversationStatus::Blocked { .. })
+            )
+        })
+}
+
+/// Fixed display order for the group rollup color dots: green, yellow, magenta,
+/// red, then any other colors (whose relative order is unspecified).
+fn group_color_sort_key(color: AnsiColorIdentifier) -> u8 {
+    match color {
+        AnsiColorIdentifier::Green => 0,
+        AnsiColorIdentifier::Yellow => 1,
+        AnsiColorIdentifier::Magenta => 2,
+        AnsiColorIdentifier::Red => 3,
+        _ => 4,
+    }
+}
+
+/// Tallies the manual colors assigned to a group's member tabs. Powers the
+/// collapsed-group header rollup, which shows a colored dot and a count per
+/// distinct tab color (uncolored tabs are ignored), ordered by
+/// [`group_color_sort_key`].
+fn compute_group_color_counts(
+    workspace: &Workspace,
+    members: &[(usize, Option<Vec<PaneId>>)],
+) -> Vec<(AnsiColorIdentifier, usize)> {
+    let mut counts: Vec<(AnsiColorIdentifier, usize)> = Vec::new();
+    for (tab_index, _) in members {
+        let Some(color) = workspace.tabs.get(*tab_index).and_then(|tab| tab.color()) else {
+            continue;
+        };
+        if let Some(entry) = counts.iter_mut().find(|(c, _)| *c == color) {
+            entry.1 += 1;
+        } else {
+            counts.push((color, 1));
+        }
+    }
+    counts.sort_by_key(|(color, _)| group_color_sort_key(*color));
+    counts
 }
 
 fn coalesce_summary_branch_entries(
@@ -1267,6 +1350,9 @@ const CONTROL_BAR_VERTICAL_PADDING: f32 = 4.;
 const CONTROL_BAR_SPACING: f32 = 4.;
 const SEARCH_ICON_SIZE: f32 = 12.;
 const SEARCH_BAR_HEIGHT: f32 = 24.;
+/// Trailing empty space below the tab list, inside the scroll region (~5 tab rows
+/// tall), so the last tabs can be scrolled up away from the panel's bottom edge.
+const PANEL_BOTTOM_SPACER_HEIGHT: f32 = 220.;
 const CONTROL_BAR_BUTTON_RADIUS: Radius = Radius::Pixels(4.);
 const SPLIT_BUTTON_HEIGHT: f32 = SEARCH_BAR_HEIGHT;
 pub(super) const VERTICAL_TABS_ADD_TAB_POSITION_ID: &str = "vertical_tabs_add_tab_button";
@@ -1423,19 +1509,22 @@ fn render_control_bar(
         .with_child(Shrinkable::new(1., text_input).finish())
         .finish();
 
+    let collapse_all_button = render_collapse_all_toggle_button(state, workspace, appearance);
     let settings_button = render_settings_button(state, appearance);
     let new_tab_button = render_new_tab_button(state, workspace, appearance, app);
 
-    Container::new(
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(CONTROL_BAR_SPACING)
-            .with_child(Shrinkable::new(1., search_bar).finish())
-            .with_child(settings_button)
-            .with_child(new_tab_button)
-            .finish(),
-    )
+    let mut controls = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(CONTROL_BAR_SPACING)
+        .with_child(Shrinkable::new(1., search_bar).finish());
+    if let Some(collapse_all_button) = collapse_all_button {
+        controls.add_child(collapse_all_button);
+    }
+    controls.add_child(settings_button);
+    controls.add_child(new_tab_button);
+
+    Container::new(controls.finish())
     .with_padding(
         Padding::uniform(CONTROL_BAR_VERTICAL_PADDING)
             .with_left(GROUP_HORIZONTAL_PADDING)
@@ -1494,6 +1583,84 @@ fn render_detail_kind_badge_icon(
             typed.icon().to_warpui_icon(fill).finish()
         }
     }
+}
+
+/// A single control-bar button that toggles every tab group between fully
+/// collapsed and fully expanded. The icon and action flip based on current state:
+/// when all groups are collapsed it expands them, otherwise it collapses them.
+/// Returns `None` when there are no groups (nothing to toggle).
+fn render_collapse_all_toggle_button(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    appearance: &Appearance,
+) -> Option<Box<dyn Element>> {
+    if workspace.tab_groups.is_empty() {
+        return None;
+    }
+    let theme = appearance.theme();
+    let sub_text = theme.sub_text_color(theme.background());
+    let ui_builder = appearance.ui_builder().clone();
+
+    let all_collapsed = workspace.tab_groups.values().all(|group| group.collapsed);
+    let (icon, tooltip, action) = if all_collapsed {
+        (
+            WarpIcon::ChevronDown,
+            "Expand all groups",
+            WorkspaceAction::ExpandAllTabGroups,
+        )
+    } else {
+        (
+            WarpIcon::ChevronUp,
+            "Collapse all groups",
+            WorkspaceAction::CollapseAllTabGroups,
+        )
+    };
+
+    let button = Hoverable::new(
+        state.collapse_all_button_mouse_state.clone(),
+        move |hover_state| {
+            let icon = ConstrainedBox::new(icon.to_warpui_icon(sub_text).finish())
+                .with_width(16.)
+                .with_height(16.)
+                .finish();
+
+            let background = if hover_state.is_hovered() {
+                internal_colors::fg_overlay_2(theme)
+            } else {
+                ThemeFill::Solid(ColorU::transparent_black())
+            };
+
+            let button_container = Container::new(icon)
+                .with_padding(Padding::uniform(2.))
+                .with_background(background)
+                .with_corner_radius(CornerRadius::with_all(CONTROL_BAR_BUTTON_RADIUS))
+                .finish();
+
+            if hover_state.is_hovered() {
+                let tooltip = ui_builder.tool_tip(tooltip.to_string()).build().finish();
+                let mut stack = Stack::new().with_child(button_container);
+                stack.add_positioned_overlay_child(
+                    tooltip,
+                    OffsetPositioning::offset_from_parent(
+                        vec2f(0., 4.),
+                        ParentOffsetBounds::WindowByPosition,
+                        ParentAnchor::BottomMiddle,
+                        ChildAnchor::TopMiddle,
+                    ),
+                );
+                stack.finish()
+            } else {
+                button_container
+            }
+        },
+    )
+    .on_click(move |ctx, _, _| {
+        ctx.dispatch_typed_action(action.clone());
+    })
+    .with_cursor(Cursor::PointingHand)
+    .finish();
+
+    Some(button)
 }
 
 fn render_settings_button(
@@ -1664,9 +1831,23 @@ fn render_vertical_tabs_panel(
     let appearance = Appearance::as_ref(app);
     let theme = appearance.theme();
 
+    // Append an empty spacer below the tab list, inside the scroll region, so the
+    // user can scroll the last tabs up away from the panel's bottom edge (~5 tab
+    // rows of trailing space).
+    let scroll_content = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(render_groups(state, workspace, app))
+        .with_child(
+            ConstrainedBox::new(Empty::new().finish())
+                .with_height(PANEL_BOTTOM_SPACER_HEIGHT)
+                .finish(),
+        )
+        .finish();
+
     let scrollable_groups = ClippedScrollable::vertical(
         state.scroll_state.clone(),
-        render_groups(state, workspace, app),
+        scroll_content,
         ScrollbarWidth::Custom(4.),
         theme.nonactive_ui_detail().into(),
         theme.active_ui_detail().into(),
@@ -2706,6 +2887,7 @@ fn render_grouped_tabs_header(
     is_being_renamed: bool,
     rename_editor: Option<&ViewHandle<EditorView>>,
     collapsed_member_kinds: Option<&[SummaryPaneKind]>,
+    color_counts: Option<Vec<(AnsiColorIdentifier, usize)>>,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let appearance = Appearance::as_ref(app);
@@ -2757,15 +2939,49 @@ fn render_grouped_tabs_header(
                 .with_color(main_text_color.into())
                 .finish()
         };
-    let subtitle_text = if member_count == 1 {
-        "1 tab".to_string()
+    // Summarize the group by the manual tab colors it contains: a colored dot +
+    // count per distinct color, spaced apart. Shown whether collapsed or expanded;
+    // falls back to the plain tab count when no member tab is colored.
+    let color_counts = color_counts.filter(|counts| !counts.is_empty());
+    let subtitle: Box<dyn Element> = if let Some(counts) = color_counts {
+        let mut row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(8.);
+        for (color, count) in counts {
+            let dot = ConstrainedBox::new(
+                WarpIcon::CircleFilled
+                    .to_warpui_icon(tab_ansi_fill(color, theme).into())
+                    .finish(),
+            )
+            .with_width(8.)
+            .with_height(8.)
+            .finish();
+            let count_text = Text::new_inline(format!("{count}"), font_family, 10.)
+                .with_color(sub_text_color.into())
+                .finish();
+            row.add_child(
+                Flex::row()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                    .with_spacing(3.)
+                    .with_child(dot)
+                    .with_child(count_text)
+                    .finish(),
+            );
+        }
+        row.finish()
     } else {
-        format!("{member_count} tabs")
+        let subtitle_text = if member_count == 1 {
+            "1 tab".to_string()
+        } else {
+            format!("{member_count} tabs")
+        };
+        Text::new_inline(subtitle_text, font_family, 10.)
+            .with_clip(ClipConfig::ellipsis())
+            .with_color(sub_text_color.into())
+            .finish()
     };
-    let subtitle = Text::new_inline(subtitle_text, font_family, 10.)
-        .with_clip(ClipConfig::ellipsis())
-        .with_color(sub_text_color.into())
-        .finish();
     let text_column: Box<dyn Element> = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start)
@@ -2955,6 +3171,10 @@ fn render_grouped_tab_container(
         // rendered then, so this skips the per-tab pane walk when expanded.
         let collapsed_member_kinds =
             is_collapsed.then(|| workspace.compute_group_member_kinds(group.id, app));
+        // Summarize member tab colors as colored dot + count in the header
+        // subtitle, shown whether the group is collapsed or expanded (replacing
+        // the plain "N tabs" count whenever any member tab is colored).
+        let color_counts = Some(compute_group_color_counts(workspace, members));
         content.add_child(render_grouped_tabs_header(
             &group,
             member_count,
@@ -2965,6 +3185,7 @@ fn render_grouped_tab_container(
             is_being_renamed,
             rename_editor.as_ref(),
             collapsed_member_kinds.as_deref(),
+            color_counts,
             app,
         ));
 

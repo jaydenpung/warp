@@ -602,6 +602,17 @@ pub fn init(app: &mut AppContext) {
         .with_mac_key_binding("shift-cmd-}")
         .with_linux_or_windows_key_binding("ctrl-pagedown"),
         EditableBinding::new(
+            "workspace:focus_next_waiting_tab",
+            "Focus next tab waiting for input",
+            WorkspaceAction::FocusNextWaitingTab,
+        )
+        .with_context_predicate(
+            id!("Workspace") & id!("Workspace_MultipleTabs") & !id!("Workspace_PaneDragging"),
+        )
+        .with_group(bindings::BindingGroup::Navigation.as_str())
+        .with_mac_key_binding("cmd-shift-j")
+        .with_linux_or_windows_key_binding("ctrl-shift-j"),
+        EditableBinding::new(
             "pane_group:navigate_prev",
             "Activate previous pane",
             WorkspaceAction::NavigatePrevPaneOrPanel,

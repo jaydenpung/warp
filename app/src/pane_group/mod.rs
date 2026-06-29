@@ -8112,3 +8112,111 @@ fn claude_resume_command_for_pane(session_uuid: &[u8]) -> Option<String> {
         "CLAUDE_CONFIG_DIR='{config_dir}' claude --resume '{session_id}'"
     ))
 }
+
+/// Encodes an absolute working directory the way Claude Code names its per-project
+/// transcript folder: every non-alphanumeric character becomes `-`. e.g.
+/// `/Users/me/work/warp` -> `-Users-me-work-warp`.
+#[cfg(target_os = "macos")]
+fn encode_claude_project_dir(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// A past Claude Code session discovered on disk for a working directory.
+#[cfg(target_os = "macos")]
+pub(crate) struct ClaudeSessionEntry {
+    pub config_dir: String,
+    pub session_id: String,
+    pub modified: std::time::SystemTime,
+    /// The session's AI-assigned title when available, else a short id.
+    pub title: String,
+}
+
+/// Reads the AI-assigned title from the start of a transcript, if present. Only
+/// the first few KB are scanned since the title lines are written up front.
+#[cfg(target_os = "macos")]
+fn claude_session_title(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = vec![0u8; 8192];
+    let n = file.read(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf[..n]);
+    for line in text.lines() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let field = match value.get("type").and_then(|t| t.as_str()) {
+            Some("ai-title") => "aiTitle",
+            Some("agent-name") => "agentName",
+            _ => continue,
+        };
+        if let Some(title) = value.get(field).and_then(|t| t.as_str()) {
+            let title = title.trim();
+            if !title.is_empty() {
+                return Some(title.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Discovers recent Claude Code sessions for `cwd` across every `~/.claude*`
+/// account directory, most-recently-modified first. Powers the per-tab
+/// "Resume Claude session" menu so the user can reopen any past conversation
+/// for that directory, not just the last one.
+#[cfg(target_os = "macos")]
+pub(crate) fn recent_claude_sessions_for_dir(cwd: &str, limit: usize) -> Vec<ClaudeSessionEntry> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+    };
+    let encoded = encode_claude_project_dir(cwd);
+    let mut entries: Vec<ClaudeSessionEntry> = Vec::new();
+
+    let Ok(home_dir) = std::fs::read_dir(&home) else {
+        return Vec::new();
+    };
+    for account in home_dir.flatten() {
+        let name = account.file_name();
+        if !name.to_string_lossy().starts_with(".claude") {
+            continue;
+        }
+        let config_dir = account.path();
+        let project_dir = config_dir.join("projects").join(&encoded);
+        let Ok(sessions) = std::fs::read_dir(&project_dir) else {
+            continue;
+        };
+        for session in sessions.flatten() {
+            let path = session.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Some(session_id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let modified = session
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            let title = claude_session_title(&path)
+                .unwrap_or_else(|| session_id.chars().take(8).collect());
+            entries.push(ClaudeSessionEntry {
+                config_dir: config_dir.to_string_lossy().into_owned(),
+                session_id: session_id.to_string(),
+                modified,
+                title,
+            });
+        }
+    }
+
+    entries.sort_by(|a, b| b.modified.cmp(&a.modified));
+    entries.truncate(limit);
+    entries
+}
+
+/// Builds the shell command that resumes a specific Claude session under the
+/// right account, mirroring the auto-resume-on-restore format.
+#[cfg(target_os = "macos")]
+pub(crate) fn claude_resume_command(config_dir: &str, session_id: &str) -> String {
+    format!("CLAUDE_CONFIG_DIR='{config_dir}' claude --resume '{session_id}'")
+}

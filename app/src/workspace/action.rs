@@ -130,6 +130,12 @@ pub enum WorkspaceAction {
     ActivatePrevTab,
     ActivateNextTab,
     ActivateLastTab,
+    /// Focus the next tab (cyclically after the active one) whose agent is blocked
+    /// waiting for user input.
+    FocusNextWaitingTab,
+    /// Inject a `claude --resume` command into the focused terminal of the given
+    /// tab, resuming a past Claude Code session picked from the tab menu.
+    ResumeClaudeSession { tab_index: usize, command: String },
     CyclePrevSession,
     CycleNextSession,
     MoveActiveTabLeft,
@@ -184,6 +190,10 @@ pub enum WorkspaceAction {
     CloseTabGroup(TabGroupId),
     /// Toggle collapsed state for the given tab group.
     ToggleTabGroupCollapsed(TabGroupId),
+    /// Collapse every tab group in the workspace.
+    CollapseAllTabGroups,
+    /// Expand every tab group in the workspace.
+    ExpandAllTabGroups,
     /// Opens an inline editor over the given group's header for renaming.
     RenameTabGroup(TabGroupId),
     /// Creates a new tab group containing the tab at the given index.
@@ -899,6 +909,7 @@ impl WorkspaceAction {
             | ActivatePrevTab
             | ActivateNextTab
             | ActivateLastTab
+            | FocusNextWaitingTab
             | CyclePrevSession
             | CycleNextSession
             | MoveActiveTabLeft
@@ -923,6 +934,8 @@ impl WorkspaceAction {
             | CloseTabsRightActiveTab
             | CloseTabGroup(_)
             | ToggleTabGroupCollapsed(_)
+            | CollapseAllTabGroups
+            | ExpandAllTabGroups
             | RenameTabGroup(_)
             | NewTabGroupFromTab(_)
             | MoveTabToGroup { .. }
@@ -1168,7 +1181,8 @@ impl WorkspaceAction {
             | ShowHandoffEnvironmentCreationModal
             | ShowCloudModeV2EnvironmentCreationModal
             | OpenCreateAuthSecretModal { .. }
-            | OpenNetworkLogPane => false,
+            | OpenNetworkLogPane
+            | ResumeClaudeSession { .. } => false,
             #[cfg(debug_assertions)]
             ShowHoaOnboardingFlow => false,
             #[cfg(target_family = "wasm")]
