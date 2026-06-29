@@ -339,6 +339,24 @@ impl PaneRowStackPosition {
     }
 }
 
+/// Resolves a tab/group ANSI color to its fill.
+/// Yellow → dark mustard, blue → dark blue, cyan → dark cyan (deep dark tones);
+/// every other color keeps the theme's normal palette tint.
+fn tab_ansi_fill(color: AnsiColorIdentifier, theme: &WarpTheme) -> ThemeFill {
+    // Yellow/blue/cyan use fixed dark hues; other colors use the theme's
+    // normal palette. Opacity is applied later, in pane_row_background.
+    let fixed = match color {
+        AnsiColorIdentifier::Yellow => Some(ColorU::new(186, 142, 35, 255)), // #BA8E23 dark yellow
+        AnsiColorIdentifier::Blue => Some(ColorU::new(42, 92, 143, 255)),    // dark blue
+        AnsiColorIdentifier::Cyan => Some(ColorU::new(31, 130, 144, 255)),   // dark cyan
+        _ => None,
+    };
+    match fixed {
+        Some(c) => ThemeFill::Solid(c),
+        None => color.to_ansi_color(&theme.terminal_colors().normal).into(),
+    }
+}
+
 fn pane_row_background(
     pane_color: Option<ThemeFill>,
     is_selected: bool,
@@ -5350,9 +5368,7 @@ fn compute_tab_group_color_mode(
     // Manual override applies to the whole group.
     if tab.selected_color != SelectedTabColor::Unset {
         return match tab.color() {
-            Some(color) => TabGroupColorMode::Uniform(
-                color.to_ansi_color(&theme.terminal_colors().normal).into(),
-            ),
+            Some(color) => TabGroupColorMode::Uniform(tab_ansi_fill(color, theme)),
             None => TabGroupColorMode::None,
         };
     }
@@ -5412,12 +5428,12 @@ fn compute_tab_group_color_mode(
         TabGroupColorMode::None
     } else if is_uniform {
         let color = distinct_colors[0];
-        TabGroupColorMode::Uniform(color.to_ansi_color(&theme.terminal_colors().normal).into())
+        TabGroupColorMode::Uniform(tab_ansi_fill(color, theme))
     } else {
         let theme_map = per_pane
             .into_iter()
             .map(|(id, c)| {
-                let fill = c.map(|c| c.to_ansi_color(&theme.terminal_colors().normal).into());
+                let fill = c.map(|c| tab_ansi_fill(c, theme));
                 (id, fill)
             })
             .collect();
