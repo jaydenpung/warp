@@ -610,8 +610,8 @@ pub fn init(app: &mut AppContext) {
             id!("Workspace") & id!("Workspace_MultipleTabs") & !id!("Workspace_PaneDragging"),
         )
         .with_group(bindings::BindingGroup::Navigation.as_str())
-        .with_mac_key_binding("cmd-shift-j")
-        .with_linux_or_windows_key_binding("ctrl-shift-j"),
+        .with_mac_key_binding("cmd-shift-J")
+        .with_linux_or_windows_key_binding("ctrl-shift-J"),
         EditableBinding::new(
             "pane_group:navigate_prev",
             "Activate previous pane",
