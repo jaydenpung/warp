@@ -212,6 +212,20 @@ impl NotificationItems {
             .iter()
             .any(|item| item.terminal_view_id == terminal_view_id && !item.is_read)
     }
+
+    /// Creation time of the most-recent unread notification for the given
+    /// terminal view, if any. Items are stored newest-first, so the first
+    /// unread match is the newest. Used to time-box the vertical-tab
+    /// activity-dot pulse animation.
+    pub(crate) fn latest_unread_created_at_for_terminal_view(
+        &self,
+        terminal_view_id: EntityId,
+    ) -> Option<Instant> {
+        self.items
+            .iter()
+            .find(|item| item.terminal_view_id == terminal_view_id && !item.is_read)
+            .map(|item| item.created_at)
+    }
 }
 
 #[cfg(test)]

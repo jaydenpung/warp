@@ -1,10 +1,13 @@
 pub mod telemetry;
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use instant::Instant;
 use languages::language_by_local_filename;
 use pathfinder_color::ColorU;
 use pathfinder_geometry::rect::RectF;
@@ -23,17 +26,21 @@ use warpui::elements::{
     DispatchEventResult, DragAxis, DragBarSide, Draggable, DropShadow, DropTarget, Element, Empty,
     EventHandler, Expanded, Fill as ElementFill, Flex, Hoverable, MainAxisAlignment, MainAxisSize,
     MouseStateHandle, OffsetPositioning, Padding, ParentAnchor, ParentElement, ParentOffsetBounds,
-    PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
+    Point, PositionedElementAnchor, PositionedElementOffsetBounds, Radius, Resizable,
     ResizableStateHandle, SavePosition, ScrollTarget, ScrollToPositionMode, ScrollbarWidth,
     Shrinkable, Stack, Text, Wrap,
 };
+use warpui::event::DispatchedEvent;
 use warpui::fonts::{Properties, Weight};
 use warpui::platform::Cursor;
 use warpui::prelude::Align;
 use warpui::text_layout::ClipConfig;
 use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
-use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
+use warpui::{
+    AfterLayoutContext, AppContext, EntityId, EventContext, LayoutContext, PaintContext,
+    SingletonEntity, SizeConstraint, ViewHandle, WindowId,
+};
 
 use super::{render_group_member_icon_collage, select_unique_pane_kinds};
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
@@ -3812,17 +3819,133 @@ fn render_title_indicator(theme: &WarpTheme) -> Box<dyn Element> {
 /// Diameter of the white activity dot overlaid on the pane icon's bottom-left.
 const ICON_ACTIVITY_DOT_SIZE: f32 = 12.;
 
+/// Activity-dot pulse: opacity eases between these bounds.
+const ACTIVITY_DOT_PULSE_MIN_OPACITY: f32 = 0.35;
+const ACTIVITY_DOT_PULSE_MAX_OPACITY: f32 = 1.0;
+/// Length of one full fade-out-and-back cycle.
+const ACTIVITY_DOT_PULSE_PERIOD_SECS: f32 = 1.2;
+/// Repaint cadence while pulsing (~20fps). Coarse enough to keep the
+/// continuous-repaint cost low while still reading as a smooth fade.
+const ACTIVITY_DOT_PULSE_FRAME: Duration = Duration::from_millis(50);
+/// Stop pulsing (hold the dot at full opacity) once the underlying activity is
+/// this old, to bound the continuous-repaint cost. The dot stays visible; it
+/// just stops animating.
+const ACTIVITY_DOT_PULSE_MAX_DURATION: Duration = Duration::from_secs(5 * 60);
+
+/// Eased pulse opacity for `elapsed_secs` since the activity began. Cosine so it
+/// starts at full opacity, fades down to the min, and back, once per period.
+fn activity_dot_pulse_opacity(elapsed_secs: f32) -> f32 {
+    let phase = (elapsed_secs / ACTIVITY_DOT_PULSE_PERIOD_SECS) * std::f32::consts::TAU;
+    let unit = 0.5 + 0.5 * phase.cos(); // 1.0 at elapsed 0, down to 0.0, back
+    ACTIVITY_DOT_PULSE_MIN_OPACITY
+        + (ACTIVITY_DOT_PULSE_MAX_OPACITY - ACTIVITY_DOT_PULSE_MIN_OPACITY) * unit
+}
+
 /// White activity dot drawn over the bottom-left of the pane icon when the pane
-/// has unread agent activity (needs input / finished) or an unsaved-changes badge.
-fn render_icon_activity_dot() -> Box<dyn Element> {
+/// has unread agent activity (needs input / finished) or an unsaved-changes
+/// badge. `opacity` lets the caller pulse it.
+///
+/// The alpha is baked into the fill color rather than set via `Icon::with_opacity`:
+/// the Metal renderer only honors the `opacity` field for images, not icons (it
+/// draws icons with `icon.color` directly), so an icon's color alpha is the only
+/// knob that actually changes how translucent it renders.
+fn render_icon_activity_dot(opacity: f32) -> Box<dyn Element> {
+    let alpha = (opacity.clamp(0., 1.) * 255.).round() as u8;
+    let color = ColorU::new(255, 255, 255, alpha);
     ConstrainedBox::new(
         WarpIcon::CircleFilled
-            .to_warpui_icon(WarpThemeFill::Solid(ColorU::white()))
+            .to_warpui_icon(WarpThemeFill::Solid(color))
             .finish(),
     )
     .with_width(ICON_ACTIVITY_DOT_SIZE)
     .with_height(ICON_ACTIVITY_DOT_SIZE)
     .finish()
+}
+
+/// The activity dot, pulsing its opacity over time. The opacity has to be
+/// recomputed during `layout` (not at view-render time): a timer-driven redraw
+/// re-runs layout + paint on the existing element tree but does *not* re-run the
+/// view's `render`, so a fixed opacity baked at render time would never change.
+///
+/// Each `layout` recomputes the eased opacity from the activity's age and
+/// decides whether to keep animating. We only animate while (a) this window is
+/// focused and (b) the activity is younger than the pulse cap — so the
+/// continuous repaints the pulse drives can't run in the background or linger
+/// indefinitely. When animating, `paint` schedules the next frame via
+/// `repaint_after`; once gated off it stops, holding the dot at full opacity,
+/// and the window returns to repaint-on-demand.
+struct PulsingDot {
+    started_at: Instant,
+    window_id: WindowId,
+    child: Box<dyn Element>,
+    animate: bool,
+}
+
+impl PulsingDot {
+    fn new(started_at: Instant, window_id: WindowId) -> Self {
+        Self {
+            started_at,
+            window_id,
+            child: render_icon_activity_dot(ACTIVITY_DOT_PULSE_MAX_OPACITY),
+            animate: false,
+        }
+    }
+}
+
+impl Element for PulsingDot {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let window_focused = app.windows().active_window() == Some(self.window_id);
+        let elapsed = self.started_at.elapsed();
+        let (opacity, animate) = if window_focused && elapsed < ACTIVITY_DOT_PULSE_MAX_DURATION {
+            (activity_dot_pulse_opacity(elapsed.as_secs_f32()), true)
+        } else {
+            (ACTIVITY_DOT_PULSE_MAX_OPACITY, false)
+        };
+        self.animate = animate;
+        self.child = render_icon_activity_dot(opacity);
+        self.child.layout(constraint, ctx, app)
+    }
+
+    fn after_layout(&mut self, ctx: &mut AfterLayoutContext, app: &AppContext) {
+        self.child.after_layout(ctx, app);
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.child.paint(origin, ctx, app);
+        if self.animate {
+            ctx.repaint_after(ACTIVITY_DOT_PULSE_FRAME);
+        }
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.child.size()
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.child.origin()
+    }
+
+    fn bounds(&self) -> Option<RectF> {
+        self.child.bounds()
+    }
+
+    fn parent_data(&self) -> Option<&dyn Any> {
+        self.child.parent_data()
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child.dispatch_event(event, ctx, app)
+    }
 }
 
 fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
@@ -3844,9 +3967,27 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
     let show_activity_indicator =
         props.typed.badge(app).is_some() || has_unread_activity(&props.typed, app);
     let icon = if show_activity_indicator {
+        // Agent activity (needs input / finished) carries a notification whose
+        // creation time anchors the pulse. The unsaved-changes badge has no such
+        // timestamp, so it just shows a static dot.
+        let activity_started_at = if let TypedPane::Terminal(terminal_pane) = &props.typed {
+            let terminal_view_id = terminal_pane.terminal_view(app).as_ref(app).id();
+            AgentNotificationsModel::as_ref(app)
+                .notifications()
+                .latest_unread_created_at_for_terminal_view(terminal_view_id)
+        } else {
+            None
+        };
+        let dot = match activity_started_at {
+            Some(started_at) => {
+                PulsingDot::new(started_at, props.detail_hover_state.window_id).finish()
+            }
+            None => render_icon_activity_dot(ACTIVITY_DOT_PULSE_MAX_OPACITY),
+        };
+
         let mut stack = Stack::new().with_child(icon);
         stack.add_positioned_overlay_child(
-            render_icon_activity_dot(),
+            dot,
             OffsetPositioning::offset_from_parent(
                 vec2f(0., 0.),
                 ParentOffsetBounds::ParentByPosition,
