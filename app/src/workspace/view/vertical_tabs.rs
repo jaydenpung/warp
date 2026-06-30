@@ -3759,6 +3759,22 @@ fn render_title_indicator(theme: &WarpTheme) -> Box<dyn Element> {
     .finish()
 }
 
+/// Diameter of the white activity dot overlaid on the pane icon's bottom-left.
+const ICON_ACTIVITY_DOT_SIZE: f32 = 12.;
+
+/// White activity dot drawn over the bottom-left of the pane icon when the pane
+/// has unread agent activity (needs input / finished) or an unsaved-changes badge.
+fn render_icon_activity_dot() -> Box<dyn Element> {
+    ConstrainedBox::new(
+        WarpIcon::CircleFilled
+            .to_warpui_icon(WarpThemeFill::Solid(ColorU::white()))
+            .finish(),
+    )
+    .with_width(ICON_ACTIVITY_DOT_SIZE)
+    .with_height(ICON_ACTIVITY_DOT_SIZE)
+    .finish()
+}
+
 fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
     let effective_subtitle = props.subtitle.clone();
     let appearance = Appearance::as_ref(app);
@@ -3769,6 +3785,29 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
         resolve_icon_with_status_variant(&props.typed, &props.title, appearance, app),
         theme,
     );
+
+    // Activity indicator (agent needs input / finished, or an unsaved-changes
+    // badge) is drawn as a dot at the bottom-left of the pane icon rather than
+    // on the right of the title. The bottom-left corner of the icon's bounding
+    // box is empty (the glyph is circular) so the dot doesn't cover it. Same
+    // trigger as before, just a different location.
+    let show_activity_indicator =
+        props.typed.badge(app).is_some() || has_unread_activity(&props.typed, app);
+    let icon = if show_activity_indicator {
+        let mut stack = Stack::new().with_child(icon);
+        stack.add_positioned_overlay_child(
+            render_icon_activity_dot(),
+            OffsetPositioning::offset_from_parent(
+                vec2f(0., 0.),
+                ParentOffsetBounds::ParentByPosition,
+                ParentAnchor::BottomLeft,
+                ChildAnchor::BottomLeft,
+            ),
+        );
+        stack.finish()
+    } else {
+        icon
+    };
 
     // Top-align the icon when there are multiple lines of content so it sits next to
     // the first line; center it for single-line rows (Settings, Notebook with no subtitle, etc.).
@@ -3787,8 +3826,6 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
             app,
         )
     } else {
-        let has_indicator =
-            props.typed.badge(app).is_some() || has_unread_activity(&props.typed, app);
         let mut title_row = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
@@ -3813,13 +3850,6 @@ fn render_pane_row(props: PaneProps<'_>, app: &AppContext) -> Box<dyn Element> {
             )
             .finish(),
         );
-        if has_indicator {
-            title_row.add_child(
-                Container::new(render_title_indicator(theme))
-                    .with_margin_left(4.)
-                    .finish(),
-            );
-        }
 
         let mut content_col = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
@@ -4753,21 +4783,9 @@ fn render_terminal_row_content(
         }
     };
 
-    let first_line_element = if has_unread_activity(&props.typed, app) {
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_main_axis_alignment(MainAxisAlignment::SpaceBetween)
-            .with_child(Shrinkable::new(1., first_line).finish())
-            .with_child(
-                Container::new(render_title_indicator(theme))
-                    .with_margin_left(4.)
-                    .finish(),
-            )
-            .finish()
-    } else {
-        first_line
-    };
+    // The activity dot now overlays the pane icon (see `render_pane_row`), so the
+    // first line just renders the title without a trailing right-side indicator.
+    let first_line_element = first_line;
 
     let mut content = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
