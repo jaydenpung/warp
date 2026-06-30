@@ -6025,6 +6025,12 @@ impl PaneGroup {
             }
         }
 
+        // Record the stable per-pane session uuid on the view so a detected
+        // CLI-agent launch can persist its launch alias for auto-resume.
+        terminal_view.update(ctx, |view, _ctx| {
+            view.set_terminal_session_uuid(terminal_session_uuid.to_vec());
+        });
+
         (terminal_view, terminal_manager)
     }
 
@@ -8130,6 +8136,28 @@ fn claude_resume_command_for_pane(session_uuid: &[u8]) -> Option<String> {
         .any(|entry| entry.path().join(&transcript).is_file());
     if !still_exists {
         return None;
+    }
+
+    // If Warp recorded the shell word used to launch this session (e.g. an alias
+    // like `claude-company` that sets the account, model, and
+    // --dangerously-skip-permissions), replay it so the resumed session keeps
+    // those flags. It runs at the interactive prompt, where the alias is defined
+    // and expands. Validate it's a plain shell word so a malformed mapping can't
+    // inject arbitrary text, and skip the bare `claude` binary (the default form
+    // below already covers that and carries CLAUDE_CONFIG_DIR).
+    let alias_path = std::path::Path::new(&home)
+        .join(".warp-claude-sessions")
+        .join(format!("{}.alias", hex::encode(session_uuid)));
+    if let Ok(alias) = std::fs::read_to_string(&alias_path) {
+        let alias = alias.trim();
+        let is_safe_word = !alias.is_empty()
+            && alias != "claude"
+            && alias
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+        if is_safe_word {
+            return Some(format!("{alias} --resume '{session_id}'"));
+        }
     }
 
     Some(format!(

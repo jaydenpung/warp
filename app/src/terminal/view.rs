@@ -2468,6 +2468,11 @@ pub struct TerminalView {
     pub model: Arc<FairMutex<TerminalModel>>,
     view_handle: WeakViewHandle<Self>,
 
+    /// Stable per-pane session uuid (the value Warp exports as
+    /// `WARP_TERMINAL_SESSION_UUID`). Recorded so a detected CLI-agent launch
+    /// can persist the typed launch alias for auto-resume after restart.
+    terminal_session_uuid: Vec<u8>,
+
     /// The session's size data. This is wrapped in a [`Tracked`] to
     /// guarantee that the [`TerminalView`] is redrawn whenever the
     /// size info changes.
@@ -4254,6 +4259,7 @@ impl TerminalView {
             input,
             inline_menu_positioner,
             view_handle: ctx.handle(),
+            terminal_session_uuid: Vec::new(),
             size_info: size_info.into(),
             snackbar_header_state: Default::default(),
             colors,
@@ -4768,6 +4774,45 @@ impl TerminalView {
         send_telemetry_from_ctx!(TelemetryEvent::SessionCreation, ctx);
 
         terminal_view
+    }
+
+    /// Records the stable per-pane session uuid (exported as
+    /// `WARP_TERMINAL_SESSION_UUID`). Set right after the pane is created.
+    pub(crate) fn set_terminal_session_uuid(&mut self, uuid: Vec<u8>) {
+        self.terminal_session_uuid = uuid;
+    }
+
+    /// Persists the shell word used to launch a detected Claude Code session
+    /// (e.g. an alias like `claude-company`) next to the resume mapping
+    /// (`~/.warp-claude-sessions/<hex(uuid)>.alias`), so a restored tab can
+    /// replay the alias on auto-resume — preserving its account, model, and
+    /// permission flags — instead of a bare `claude --resume`. No-op for the
+    /// plain `claude` binary (the default resume already covers it) or when no
+    /// session uuid is known.
+    #[cfg(target_os = "macos")]
+    fn record_claude_resume_alias(&self, launch_word: Option<&str>) {
+        let Some(word) = launch_word else {
+            return;
+        };
+        if word.is_empty() || word == CLIAgent::Claude.command_prefix() {
+            return;
+        }
+        if self.terminal_session_uuid.is_empty() {
+            return;
+        }
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+        let path = std::path::Path::new(&home)
+            .join(".warp-claude-sessions")
+            .join(format!(
+                "{}.alias",
+                hex::encode(&self.terminal_session_uuid)
+            ));
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, word);
     }
 
     /// Schedule a callback to run after the next [`ModelEvent::AfterBlockCompleted`] received.
@@ -11903,6 +11948,19 @@ impl TerminalView {
                                         me.detect_cli_agent_from_model(&model, ctx)
                                     };
                                     let view_id = me.view_id;
+                                    // The shell word the user typed to launch the agent
+                                    // (e.g. an alias like `claude-company`), captured before
+                                    // the alias is lost, for auto-resume replay.
+                                    #[cfg(target_os = "macos")]
+                                    let claude_launch_word = me
+                                        .model
+                                        .lock()
+                                        .block_list()
+                                        .active_block()
+                                        .command_with_secrets_obfuscated(false)
+                                        .split_whitespace()
+                                        .next()
+                                        .map(str::to_owned);
                                     CLIAgentSessionsModel::handle(ctx).update(
                                         ctx,
                                         |sessions_model, ctx| match detection {
@@ -11947,6 +12005,14 @@ impl TerminalView {
                                             CLIAgent::Codex,
                                             ctx,
                                         );
+                                    }
+
+                                    // Record the launch alias so a restored tab can replay it
+                                    // (preserving account/model/permission flags) instead of a
+                                    // bare `claude --resume`.
+                                    #[cfg(target_os = "macos")]
+                                    if matches!(detection, Some((CLIAgent::Claude, _))) {
+                                        me.record_claude_resume_alias(claude_launch_word.as_deref());
                                     }
 
                                     me.maybe_show_use_agent_footer_in_blocklist(ctx);
