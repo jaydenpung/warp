@@ -739,6 +739,8 @@ pub(super) struct VerticalTabsPanelState {
     /// in this set are shown; groups with no surviving member disappear.
     /// Multi-select — a tab matches if its color is any of these.
     pub(super) color_filter: Vec<AnsiColorIdentifier>,
+    /// When true, the color filter also (or only) shows tabs with no manual color.
+    pub(super) filter_uncolored: bool,
     collapse_all_button_mouse_state: MouseStateHandle,
     settings_button_mouse_state: MouseStateHandle,
     panes_segment_mouse_state: MouseStateHandle,
@@ -780,6 +782,7 @@ impl Default for VerticalTabsPanelState {
             new_tab_button_state: Default::default(),
             search_query: String::new(),
             color_filter: Vec::new(),
+            filter_uncolored: false,
             collapse_all_button_mouse_state: Default::default(),
             settings_button_mouse_state: Default::default(),
             panes_segment_mouse_state: Default::default(),
@@ -1900,6 +1903,54 @@ fn render_color_filter_bar(
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_spacing(8.);
 
+    // Leading grey "uncolored" chip (to the left of the colored chips): when
+    // selected, the filter shows only tabs with no manual color.
+    let uncolored_count = workspace
+        .tabs
+        .iter()
+        .filter(|tab| tab.color().is_none())
+        .count();
+    if uncolored_count > 0 {
+        let selected = state.filter_uncolored;
+        let mouse_state = chip_mouse_state("colorfilter:uncolored");
+        let item = Hoverable::new(mouse_state, move |hover| {
+            let dot = ConstrainedBox::new(
+                WarpIcon::CircleFilled.to_warpui_icon(sub_text_color).finish(),
+            )
+            .with_width(FILTER_DOT_SIZE)
+            .with_height(FILTER_DOT_SIZE)
+            .finish();
+            let count_text = Text::new_inline(format!("{uncolored_count}"), font_family, 11.)
+                .with_color(sub_text_color.into())
+                .finish();
+            let content = Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(4.)
+                .with_child(dot)
+                .with_child(count_text)
+                .finish();
+            let bg = if selected {
+                internal_colors::fg_overlay_3(theme)
+            } else if hover.is_hovered() {
+                internal_colors::fg_overlay_2(theme)
+            } else {
+                WarpThemeFill::Solid(ColorU::transparent_black())
+            };
+            Container::new(content)
+                .with_padding(Padding::uniform(4.))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)))
+                .with_background(bg)
+                .finish()
+        })
+        .on_click(|ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::ToggleVerticalTabsUncoloredFilter);
+        })
+        .with_cursor(Cursor::PointingHand)
+        .finish();
+        row.add_child(item);
+    }
+
     for (color, count) in counts {
         let selected = state.color_filter.contains(&color);
         let mouse_state = chip_mouse_state(&format!("colorfilter:{color:?}"));
@@ -2208,14 +2259,13 @@ fn render_groups(
     if *TabSettings::as_ref(app)
         .vertical_tabs_show_color_filter
         .value()
-        && !state.color_filter.is_empty()
+        && (!state.color_filter.is_empty() || state.filter_uncolored)
     {
         visible_tabs.retain(|(tab_index, _)| {
-            workspace
-                .tabs
-                .get(*tab_index)
-                .and_then(|tab| tab.color())
-                .is_some_and(|color| state.color_filter.contains(&color))
+            match workspace.tabs.get(*tab_index).and_then(|tab| tab.color()) {
+                Some(color) => state.color_filter.contains(&color),
+                None => state.filter_uncolored,
+            }
         });
     }
 

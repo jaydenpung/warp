@@ -409,6 +409,9 @@ pub enum WorkspaceAction {
     ToggleVerticalTabsShowColorFilter,
     /// Toggle a color in the vertical-tabs bottom color filter (multi-select).
     ToggleVerticalTabsColorFilter(AnsiColorIdentifier),
+    /// Toggle the "uncolored" option in the vertical-tabs color filter, which
+    /// matches tabs with no manual color.
+    ToggleVerticalTabsUncoloredFilter,
     /// Closes the focused panel. This happens as an explicit action from the user.
     ClosePanel,
     CopyTextToClipboard(String),
@@ -1085,6 +1088,7 @@ impl WorkspaceAction {
             | ToggleVerticalTabsShowDetailsOnHover
             | ToggleVerticalTabsShowColorFilter
             | ToggleVerticalTabsColorFilter(_)
+            | ToggleVerticalTabsUncoloredFilter
             | ToggleWelcomeTips
             | CopyTextToClipboard(_)
             | CopyAccessTokenToClipboard

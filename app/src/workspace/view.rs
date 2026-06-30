@@ -24570,6 +24570,11 @@ impl TypedActionView for Workspace {
                 }
                 ctx.notify();
             }
+            ToggleVerticalTabsUncoloredFilter => {
+                self.vertical_tabs_panel.filter_uncolored =
+                    !self.vertical_tabs_panel.filter_uncolored;
+                ctx.notify();
+            }
             ToggleAgentManagementView => {
                 if AISettings::as_ref(ctx).is_any_ai_enabled(ctx)
                     && FeatureFlag::AgentManagementView.is_enabled()
