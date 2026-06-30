@@ -830,6 +830,9 @@ pub enum WorkspaceAction {
     ShowHoaOnboardingFlow,
     /// Open the "New worktree" modal for creating a reusable worktree tab config.
     OpenNewWorktreeModal,
+    /// Open the "Assign PRs" modal to manually add/remove the PR links attributed
+    /// to the tab whose focused terminal has this hex-encoded session uuid.
+    OpenAssignPrsModal { session_uuid_hex: String },
     /// Open the native folder picker for the repo field in the new-worktree modal.
     OpenNewWorktreeRepoPicker,
     /// Create a new worktree in the given repo using the default worktree tab config.
@@ -1094,6 +1097,7 @@ impl WorkspaceAction {
             | CopyAccessTokenToClipboard
             | OpenTabConfigRepoPicker { .. }
             | OpenNewWorktreeModal
+            | OpenAssignPrsModal { .. }
             | OpenNewWorktreeRepoPicker
             | OpenWorktreeInRepo { .. }
             | OpenWorktreeAddRepoPicker

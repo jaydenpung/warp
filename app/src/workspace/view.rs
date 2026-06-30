@@ -371,6 +371,7 @@ use crate::tab_configs::telemetry::{NewWorktreeConfigOpenSource, WorktreeBranchN
 use crate::tab_configs::{
     NewWorktreeModal, NewWorktreeModalEvent, TabConfigParamsModal, TabConfigParamsModalEvent,
 };
+use crate::workspace::assign_prs_modal::{AssignPrsModal, AssignPrsModalEvent};
 use crate::terminal::alt_screen_reporting::AltScreenReporting;
 use crate::terminal::available_shells::AvailableShell;
 #[cfg(target_os = "windows")]
@@ -1058,6 +1059,7 @@ pub struct Workspace {
     pending_session_config_tab_config_chip_tutorial:
         Option<PendingSessionConfigTabConfigChipTutorial>,
     new_worktree_modal: ModalViewState<Modal<NewWorktreeModal>>,
+    assign_prs_modal: ModalViewState<Modal<AssignPrsModal>>,
     close_session_confirmation_dialog: ViewHandle<CloseSessionConfirmationDialog>,
     rewind_confirmation_dialog: ViewHandle<RewindConfirmationDialog>,
     delete_conversation_confirmation_dialog: ViewHandle<DeleteConversationConfirmationDialog>,
@@ -2138,6 +2140,35 @@ impl Workspace {
         ModalViewState::new(modal)
     }
 
+    fn build_assign_prs_modal(ctx: &mut ViewContext<Self>) -> ModalViewState<Modal<AssignPrsModal>> {
+        let body = ctx.add_typed_action_view(AssignPrsModal::new);
+        ctx.subscribe_to_view(&body, |me, _, event, ctx| {
+            me.handle_assign_prs_modal_body_event(event, ctx);
+        });
+        let modal = ctx.add_typed_action_view(|ctx| {
+            // Body renders its own header; let the modal size to its content.
+            Modal::new(None, body, ctx)
+                .with_modal_style(UiComponentStyles {
+                    width: Some(480.),
+                    ..Default::default()
+                })
+                .with_body_style(UiComponentStyles {
+                    padding: Some(Coords {
+                        top: 0.,
+                        bottom: 0.,
+                        left: 0.,
+                        right: 0.,
+                    }),
+                    background: Some(ElementFill::None),
+                    ..Default::default()
+                })
+        });
+        ctx.subscribe_to_view(&modal, |me, _, event, ctx| {
+            me.handle_assign_prs_modal_event(event, ctx);
+        });
+        ModalViewState::new(modal)
+    }
+
     fn build_remove_tab_config_confirmation_dialog(
         ctx: &mut ViewContext<Self>,
     ) -> ViewHandle<RemoveTabConfigConfirmationDialog> {
@@ -2650,6 +2681,15 @@ impl Workspace {
         toast_stack: ViewHandle<DismissibleToastStack<WorkspaceAction>>,
         ctx: &mut ViewContext<Self>,
     ) {
+        // Re-render when a tab's attributed PRs change on disk (manual edits via
+        // the Assign PRs modal, or the `gh pr create` hook) so the chips update live.
+        ctx.subscribe_to_model(
+            &crate::claude_pr_attribution::ClaudePrAttributionModel::handle(ctx),
+            |_me, _, _event, ctx| {
+                ctx.notify();
+            },
+        );
+
         ctx.subscribe_to_model(&WarpConfig::handle(ctx), move |_me, _, event, ctx| {
             match event {
                 WarpConfigUpdateEvent::TabConfigs => {
@@ -2975,6 +3015,7 @@ impl Workspace {
 
         let tab_config_params_modal = Self::build_tab_config_params_modal(ctx);
         let new_worktree_modal = Self::build_new_worktree_modal(ctx);
+        let assign_prs_modal = Self::build_assign_prs_modal(ctx);
 
         let session_config_modal = Self::build_session_config_modal(ctx);
 
@@ -3368,6 +3409,7 @@ impl Workspace {
             show_session_config_tab_config_chip: false,
             pending_session_config_tab_config_chip_tutorial: None,
             new_worktree_modal,
+            assign_prs_modal,
             close_session_confirmation_dialog,
             rewind_confirmation_dialog,
             delete_conversation_confirmation_dialog,
@@ -10676,6 +10718,32 @@ impl Workspace {
         self.current_workspace_state.is_new_worktree_modal_open = false;
         self.new_worktree_modal.close();
         self.new_worktree_modal.view.update(ctx, |modal, ctx| {
+            modal.body().update(ctx, |body, ctx| {
+                body.on_close(ctx);
+            });
+        });
+        ctx.notify();
+    }
+
+    fn handle_assign_prs_modal_event(&mut self, event: &ModalEvent, ctx: &mut ViewContext<Self>) {
+        match event {
+            ModalEvent::Close => self.close_assign_prs_modal(ctx),
+        }
+    }
+
+    fn handle_assign_prs_modal_body_event(
+        &mut self,
+        event: &AssignPrsModalEvent,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        match event {
+            AssignPrsModalEvent::Close => self.close_assign_prs_modal(ctx),
+        }
+    }
+
+    fn close_assign_prs_modal(&mut self, ctx: &mut ViewContext<Self>) {
+        self.assign_prs_modal.close();
+        self.assign_prs_modal.view.update(ctx, |modal, ctx| {
             modal.body().update(ctx, |body, ctx| {
                 body.on_close(ctx);
             });
@@ -23804,6 +23872,18 @@ impl TypedActionView for Workspace {
                 self.current_workspace_state.is_new_worktree_modal_open = true;
                 ctx.notify();
             }
+            OpenAssignPrsModal { session_uuid_hex } => {
+                let session_uuid_hex = session_uuid_hex.clone();
+                let current_prs = crate::claude_pr_attribution::ClaudePrAttributionModel::as_ref(ctx)
+                    .prs_for_hex(&session_uuid_hex);
+                self.assign_prs_modal.view.update(ctx, |modal, ctx| {
+                    modal.body().update(ctx, |body, ctx| {
+                        body.on_open(session_uuid_hex, current_prs, ctx);
+                    });
+                });
+                self.assign_prs_modal.open();
+                ctx.notify();
+            }
             OpenNewWorktreeRepoPicker => {
                 self.open_repo_picker_for_new_worktree_modal(ctx);
             }
@@ -26880,6 +26960,10 @@ impl View for Workspace {
 
         if self.new_worktree_modal.is_open() {
             stack.add_child(self.new_worktree_modal.render());
+        }
+
+        if self.assign_prs_modal.is_open() {
+            stack.add_child(self.assign_prs_modal.render());
         }
 
         if self.workflow_modal.as_ref(app).is_open() {

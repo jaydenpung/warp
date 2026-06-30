@@ -254,6 +254,7 @@ impl TabData {
             self.pin_menu_items(index),
             self.tab_group_menu_items(index, tab_groups, is_only_member_of_group),
             self.session_sharing_menu_items(index, ctx),
+            self.assign_prs_menu_items(ctx),
             self.copy_metadata_menu_items(pane_name_target, ctx),
             self.modify_tab_menu_items(index, can_move_left, can_move_right, pane_name_target, ctx),
             self.close_tab_menu_items(index, tabs_len, ctx),
@@ -591,6 +592,23 @@ impl TabData {
         }
         vec![MenuItemFields::new("Save as new config")
             .with_on_select_action(WorkspaceAction::SaveCurrentTabAsNewConfig(index))
+            .into_item()]
+    }
+
+    /// "Assign PRs…" entry — opens a modal to manually add/remove the GitHub PR
+    /// links attributed to this tab's focused terminal session. Terminal-only
+    /// (needs a session uuid to key the per-session PR file).
+    fn assign_prs_menu_items(&self, ctx: &AppContext) -> Vec<MenuItem<WorkspaceAction>> {
+        let Some(session_uuid_hex) = self
+            .pane_group
+            .as_ref(ctx)
+            .focused_terminal_pane(ctx)
+            .map(|pane| hex::encode(pane.session_uuid()))
+        else {
+            return vec![];
+        };
+        vec![MenuItemFields::new("Assign PRs…")
+            .with_on_select_action(WorkspaceAction::OpenAssignPrsModal { session_uuid_hex })
             .into_item()]
     }
 

@@ -4387,6 +4387,12 @@ impl PaneGroup {
         self.content_by_pane_id(pane_id)?.as_any().downcast_ref()
     }
 
+    /// The focused terminal pane, if the focused pane is a terminal. Used to key
+    /// per-session features (e.g. PR attribution) off the focused terminal's uuid.
+    pub(crate) fn focused_terminal_pane(&self, ctx: &AppContext) -> Option<&TerminalPane> {
+        self.downcast_pane_by_id::<TerminalPane>(self.focused_pane_id(ctx))
+    }
+
     /// Returns true if the given pane is hidden for close (undo functionality).
     pub fn is_pane_hidden_for_close(&self, pane_id: PaneId) -> bool {
         self.panes.is_hidden_closed_pane(&pane_id)

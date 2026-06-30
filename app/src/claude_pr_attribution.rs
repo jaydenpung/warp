@@ -75,6 +75,17 @@ impl ClaudePrAttributionModel {
         }
     }
 
+    /// Test-only constructor that registers no filesystem watcher, so tests that
+    /// build a `Workspace` (which subscribes to this singleton) don't spawn a
+    /// real watcher or touch `~/.warp-claude-prs`.
+    #[cfg(test)]
+    pub(crate) fn new_for_testing(_ctx: &mut ModelContext<Self>) -> Self {
+        Self {
+            prs: HashMap::new(),
+            _watcher: None,
+        }
+    }
+
     #[cfg(not(target_family = "wasm"))]
     fn reload(&mut self) {
         self.prs.clear();
@@ -118,6 +129,8 @@ impl ClaudePrAttributionModel {
     ) {
         self.reload();
         ctx.notify();
+        // Notify observers (the workspace re-renders so PR chips update live).
+        ctx.emit(());
     }
 
     /// PR URLs recorded for the given pane session uuid (raw bytes), in the order
@@ -128,7 +141,73 @@ impl ClaudePrAttributionModel {
             .cloned()
             .unwrap_or_default()
     }
+
+    /// Like [`Self::prs_for`] but keyed by the already-hex-encoded session uuid.
+    pub(crate) fn prs_for_hex(&self, session_uuid_hex: &str) -> Vec<String> {
+        self.prs.get(session_uuid_hex).cloned().unwrap_or_default()
+    }
 }
+
+/// Appends `url` to `~/.warp-claude-prs/<uuid_hex>` unless already present
+/// (deduped by the first tab-separated field, tolerating legacy `\t<title>`
+/// lines). Creates the directory/file as needed; the watcher reloads so chips
+/// update live. Used by the "Assign PRs" modal.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn add_recorded_pr(uuid_hex: &str, url: &str) {
+    use std::io::Write as _;
+    let Some(dir) = prs_dir() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join(uuid_hex);
+    let already = std::fs::read_to_string(&path)
+        .map(|contents| {
+            contents
+                .lines()
+                .any(|line| line.split('\t').next().unwrap_or(line).trim() == url)
+        })
+        .unwrap_or(false);
+    if already {
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{url}");
+    }
+}
+
+/// Removes `url` from `~/.warp-claude-prs/<uuid_hex>`, deleting the file when it
+/// becomes empty. The watcher reloads so the chip disappears.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn remove_recorded_pr(uuid_hex: &str, url: &str) {
+    let Some(dir) = prs_dir() else {
+        return;
+    };
+    let path = dir.join(uuid_hex);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    let remaining: Vec<&str> = contents
+        .lines()
+        .filter(|line| line.split('\t').next().unwrap_or(line).trim() != url)
+        .collect();
+    if remaining.is_empty() {
+        let _ = std::fs::remove_file(&path);
+    } else {
+        let mut out = remaining.join("\n");
+        out.push('\n');
+        let _ = std::fs::write(&path, out);
+    }
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn add_recorded_pr(_uuid_hex: &str, _url: &str) {}
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn remove_recorded_pr(_uuid_hex: &str, _url: &str) {}
 
 impl Entity for ClaudePrAttributionModel {
     type Event = ();
