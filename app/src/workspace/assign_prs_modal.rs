@@ -21,7 +21,7 @@ use warpui::{
 };
 
 use crate::appearance::Appearance;
-use crate::claude_pr_attribution::{add_recorded_pr, remove_recorded_pr};
+use crate::claude_pr_attribution::{add_recorded_pr, remove_recorded_pr, ClaudePrAttributionModel};
 use crate::context_chips::github_pr_number_from_url;
 use crate::editor::{EditorView, Event as EditorEvent, SingleLineEditorOptions};
 use crate::modal::ModalAction;
@@ -145,6 +145,7 @@ impl AssignPrsModal {
             add_recorded_pr(&self.session_uuid_hex, &url);
             self.pr_urls.push(url);
             self.remove_button_states.push(MouseStateHandle::default());
+            self.sync_model(ctx);
         }
         self.pr_input.update(ctx, |e, ctx| {
             e.clear_buffer_and_reset_undo_stack(ctx);
@@ -161,7 +162,20 @@ impl AssignPrsModal {
             self.remove_button_states.remove(index);
         }
         remove_recorded_pr(&self.session_uuid_hex, &url);
+        self.sync_model(ctx);
         ctx.notify();
+    }
+
+    /// Pushes the current PR list straight into the shared attribution model so
+    /// the tab's chips update immediately, instead of waiting for the filesystem
+    /// watcher (which is only reliable right after startup). The file write
+    /// already happened; this keeps the in-memory model in lock-step.
+    fn sync_model(&self, ctx: &mut ViewContext<Self>) {
+        let uuid = self.session_uuid_hex.clone();
+        let urls = self.pr_urls.clone();
+        ClaudePrAttributionModel::handle(ctx).update(ctx, |model, ctx| {
+            model.set_prs_for_hex(&uuid, urls, ctx);
+        });
     }
 
     fn text_button(

@@ -146,6 +146,25 @@ impl ClaudePrAttributionModel {
     pub(crate) fn prs_for_hex(&self, session_uuid_hex: &str) -> Vec<String> {
         self.prs.get(session_uuid_hex).cloned().unwrap_or_default()
     }
+
+    /// Replaces the recorded PRs for a session in the in-memory map and notifies
+    /// observers. Called by the Assign PRs modal right after it writes the file,
+    /// so chips update immediately without waiting for the filesystem watcher
+    /// (which only fires reliably on a fresh start). Pass an empty list to clear.
+    pub(crate) fn set_prs_for_hex(
+        &mut self,
+        session_uuid_hex: &str,
+        urls: Vec<String>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if urls.is_empty() {
+            self.prs.remove(session_uuid_hex);
+        } else {
+            self.prs.insert(session_uuid_hex.to_owned(), urls);
+        }
+        ctx.notify();
+        ctx.emit(());
+    }
 }
 
 /// Appends `url` to `~/.warp-claude-prs/<uuid_hex>` unless already present
