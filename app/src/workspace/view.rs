@@ -3774,6 +3774,7 @@ impl Workspace {
             }
             | TabSettingsChangedEvent::VerticalTabsShowPrLink { .. }
             | TabSettingsChangedEvent::VerticalTabsShowDiffStats { .. }
+            | TabSettingsChangedEvent::VerticalTabsShowColorFilter { .. }
             | TabSettingsChangedEvent::HideTitleBarSearchBarInVerticalTabs { .. } => {
                 ctx.notify();
             }
@@ -24261,6 +24262,24 @@ impl TypedActionView for Workspace {
                     ),
                     ctx
                 );
+                ctx.notify();
+            }
+            ToggleVerticalTabsShowColorFilter => {
+                TabSettings::handle(ctx).update(ctx, |settings, ctx| {
+                    let new_value = !*settings.vertical_tabs_show_color_filter.value();
+                    let _ = settings
+                        .vertical_tabs_show_color_filter
+                        .set_value(new_value, ctx);
+                });
+                ctx.notify();
+            }
+            ToggleVerticalTabsColorFilter(color) => {
+                let filter = &mut self.vertical_tabs_panel.color_filter;
+                if let Some(pos) = filter.iter().position(|c| c == color) {
+                    filter.remove(pos);
+                } else {
+                    filter.push(*color);
+                }
                 ctx.notify();
             }
             ToggleAgentManagementView => {

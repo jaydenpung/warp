@@ -399,6 +399,10 @@ pub enum WorkspaceAction {
     ToggleVerticalTabsShowPrLink,
     ToggleVerticalTabsShowDiffStats,
     ToggleVerticalTabsShowDetailsOnHover,
+    /// Toggle visibility of the vertical-tabs bottom color-filter bar.
+    ToggleVerticalTabsShowColorFilter,
+    /// Toggle a color in the vertical-tabs bottom color filter (multi-select).
+    ToggleVerticalTabsColorFilter(AnsiColorIdentifier),
     /// Closes the focused panel. This happens as an explicit action from the user.
     ClosePanel,
     CopyTextToClipboard(String),
@@ -1072,6 +1076,8 @@ impl WorkspaceAction {
             | ToggleVerticalTabsShowPrLink
             | ToggleVerticalTabsShowDiffStats
             | ToggleVerticalTabsShowDetailsOnHover
+            | ToggleVerticalTabsShowColorFilter
+            | ToggleVerticalTabsColorFilter(_)
             | ToggleWelcomeTips
             | CopyTextToClipboard(_)
             | CopyAccessTokenToClipboard

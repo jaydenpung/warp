@@ -725,6 +725,10 @@ pub(super) struct VerticalTabsPanelState {
     new_tab_hover_state: MouseStateHandle,
     new_tab_button_state: MouseStateHandle,
     pub(super) search_query: String,
+    /// Active bottom-bar color filter. When non-empty, only tabs whose color is
+    /// in this set are shown; groups with no surviving member disappear.
+    /// Multi-select — a tab matches if its color is any of these.
+    pub(super) color_filter: Vec<AnsiColorIdentifier>,
     collapse_all_button_mouse_state: MouseStateHandle,
     settings_button_mouse_state: MouseStateHandle,
     panes_segment_mouse_state: MouseStateHandle,
@@ -742,6 +746,7 @@ pub(super) struct VerticalTabsPanelState {
     show_pr_link_info_tooltip_mouse_state: MouseStateHandle,
     show_diff_stats_mouse_state: MouseStateHandle,
     show_details_on_hover_mouse_state: MouseStateHandle,
+    show_color_filter_mouse_state: MouseStateHandle,
     panel_right_click_mouse_state: MouseStateHandle,
     pub(super) show_settings_popup: bool,
 }
@@ -764,6 +769,7 @@ impl Default for VerticalTabsPanelState {
             new_tab_hover_state: Default::default(),
             new_tab_button_state: Default::default(),
             search_query: String::new(),
+            color_filter: Vec::new(),
             collapse_all_button_mouse_state: Default::default(),
             settings_button_mouse_state: Default::default(),
             panes_segment_mouse_state: Default::default(),
@@ -781,6 +787,7 @@ impl Default for VerticalTabsPanelState {
             show_pr_link_info_tooltip_mouse_state: Default::default(),
             show_diff_stats_mouse_state: Default::default(),
             show_details_on_hover_mouse_state: Default::default(),
+            show_color_filter_mouse_state: Default::default(),
             panel_right_click_mouse_state: Default::default(),
             show_settings_popup: false,
         }
@@ -1162,6 +1169,25 @@ fn compute_group_color_counts(
     let mut counts: Vec<(AnsiColorIdentifier, usize)> = Vec::new();
     for (tab_index, _) in members {
         let Some(color) = workspace.tabs.get(*tab_index).and_then(|tab| tab.color()) else {
+            continue;
+        };
+        if let Some(entry) = counts.iter_mut().find(|(c, _)| *c == color) {
+            entry.1 += 1;
+        } else {
+            counts.push((color, 1));
+        }
+    }
+    counts.sort_by_key(|(color, _)| group_color_sort_key(*color));
+    counts
+}
+
+/// Tallies the manual colors across every workspace tab, ordered by
+/// [`group_color_sort_key`]. Powers the sticky bottom color-filter bar (only
+/// colors actually in use are shown).
+fn compute_workspace_color_counts(workspace: &Workspace) -> Vec<(AnsiColorIdentifier, usize)> {
+    let mut counts: Vec<(AnsiColorIdentifier, usize)> = Vec::new();
+    for tab in &workspace.tabs {
+        let Some(color) = tab.color() else {
             continue;
         };
         if let Some(entry) = counts.iter_mut().find(|(c, _)| *c == color) {
@@ -1823,6 +1849,89 @@ fn render_new_tab_button(
     .finish()
 }
 
+/// Diameter of the filter-bar color dots — larger than the 8px group-rollup dots.
+const FILTER_DOT_SIZE: f32 = 14.;
+
+/// Sticky bottom bar: one clickable color dot per tab color in use, each with a
+/// count. Clicking a dot toggles it in the multi-select color filter; selected
+/// dots show a ring. Hidden entirely when no tab is colored.
+fn render_color_filter_bar(
+    state: &VerticalTabsPanelState,
+    workspace: &Workspace,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    if !*TabSettings::as_ref(app)
+        .vertical_tabs_show_color_filter
+        .value()
+    {
+        return Empty::new().finish();
+    }
+    let counts = compute_workspace_color_counts(workspace);
+    if counts.is_empty() {
+        return Empty::new().finish();
+    }
+    let appearance = Appearance::as_ref(app);
+    let theme = appearance.theme();
+    let font_family = appearance.ui_font_family();
+    let sub_text_color = theme.sub_text_color(theme.background());
+
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(8.);
+
+    for (color, count) in counts {
+        let selected = state.color_filter.contains(&color);
+        let mouse_state = chip_mouse_state(&format!("colorfilter:{color:?}"));
+        let item = Hoverable::new(mouse_state, move |hover| {
+            // Dot keeps a fixed size/shape regardless of selection; selection is
+            // shown via the item background only.
+            let dot = ConstrainedBox::new(
+                WarpIcon::CircleFilled
+                    .to_warpui_icon(tab_ansi_fill(color, theme).into())
+                    .finish(),
+            )
+            .with_width(FILTER_DOT_SIZE)
+            .with_height(FILTER_DOT_SIZE)
+            .finish();
+            let count_text = Text::new_inline(format!("{count}"), font_family, 11.)
+                .with_color(sub_text_color.into())
+                .finish();
+            let content = Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(4.)
+                .with_child(dot)
+                .with_child(count_text)
+                .finish();
+            let bg = if selected {
+                internal_colors::fg_overlay_3(theme)
+            } else if hover.is_hovered() {
+                internal_colors::fg_overlay_2(theme)
+            } else {
+                WarpThemeFill::Solid(ColorU::transparent_black())
+            };
+            Container::new(content)
+                .with_padding(Padding::uniform(4.))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)))
+                .with_background(bg)
+                .finish()
+        })
+        .on_click(move |ctx, _, _| {
+            ctx.dispatch_typed_action(WorkspaceAction::ToggleVerticalTabsColorFilter(color));
+        })
+        .with_cursor(Cursor::PointingHand)
+        .finish();
+        row.add_child(item);
+    }
+
+    Container::new(row.finish())
+        .with_padding(Padding::uniform(8.))
+        .with_border(Border::top(1.).with_border_fill(internal_colors::fg_overlay_2(theme)))
+        .with_background(internal_colors::fg_overlay_1(theme))
+        .finish()
+}
+
 fn render_vertical_tabs_panel(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
@@ -1866,7 +1975,10 @@ fn render_vertical_tabs_panel(
             &workspace.vertical_tabs_search_input,
             app,
         ))
-        .with_child(Shrinkable::new(1., scrollable_groups).finish())
+        // `Expanded` (not `Shrinkable`) so the scrollable fills all remaining
+        // height, pinning the color-filter bar to the very bottom even with few tabs.
+        .with_child(Expanded::new(1., scrollable_groups).finish())
+        .with_child(render_color_filter_bar(state, workspace, app))
         .finish();
 
     // The settings popup is rendered at the workspace level (with Dismiss for click-outside-
@@ -1938,7 +2050,7 @@ fn render_groups(
     };
     let uses_outer_group_container = uses_outer_group_container(display_granularity);
     let query = state.search_query.as_str();
-    let visible_tabs: Vec<(usize, Option<Vec<PaneId>>)> = if query.is_empty() {
+    let mut visible_tabs: Vec<(usize, Option<Vec<PaneId>>)> = if query.is_empty() {
         workspace
             .tabs
             .iter()
@@ -2050,6 +2162,24 @@ fn render_groups(
             })
             .collect()
     };
+
+    // Bottom-bar color filter: keep only tabs whose color is selected. Applied
+    // after the search filter; groups with no surviving member disappear, since
+    // grouping downstream is derived entirely from `visible_tabs`. Only when the
+    // filter bar is enabled — otherwise there'd be no UI to clear a stale filter.
+    if *TabSettings::as_ref(app)
+        .vertical_tabs_show_color_filter
+        .value()
+        && !state.color_filter.is_empty()
+    {
+        visible_tabs.retain(|(tab_index, _)| {
+            workspace
+                .tabs
+                .get(*tab_index)
+                .and_then(|tab| tab.color())
+                .is_some_and(|color| state.color_filter.contains(&color))
+        });
+    }
 
     if visible_tabs.is_empty() {
         if query.is_empty() {
@@ -5829,6 +5959,9 @@ pub(super) fn render_settings_popup(
     let show_details_on_hover = *TabSettings::as_ref(app)
         .vertical_tabs_show_details_on_hover
         .value();
+    let show_color_filter = *TabSettings::as_ref(app)
+        .vertical_tabs_show_color_filter
+        .value();
     let show_tab_item_section = matches!(current_granularity, VerticalTabsDisplayGranularity::Tabs)
         && FeatureFlag::VerticalTabsSummaryMode.is_enabled();
     let show_focused_session_controls = !matches!(
@@ -6167,6 +6300,16 @@ pub(super) fn render_settings_popup(
         show_details_on_hover,
         state.show_details_on_hover_mouse_state.clone(),
         WorkspaceAction::ToggleVerticalTabsShowDetailsOnHover,
+        None,
+        appearance,
+        theme,
+    ));
+    popup_col.add_child(make_divider(theme));
+    popup_col.add_child(render_show_toggle_option(
+        "Show filter by color",
+        show_color_filter,
+        state.show_color_filter_mouse_state.clone(),
+        WorkspaceAction::ToggleVerticalTabsShowColorFilter,
         None,
         appearance,
         theme,
