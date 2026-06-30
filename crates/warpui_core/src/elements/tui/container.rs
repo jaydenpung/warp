@@ -82,13 +82,18 @@ impl TuiContainer {
 }
 
 impl TuiElement for TuiContainer {
-    fn layout(&mut self, constraint: TuiConstraint, ctx: &mut TuiLayoutContext) -> TuiSize {
+    fn layout(
+        &mut self,
+        constraint: TuiConstraint,
+        ctx: &mut TuiLayoutContext,
+        app: &AppContext,
+    ) -> TuiSize {
         let total = self.inset().saturating_mul(2);
         let inner_max = TuiSize::new(
             constraint.max.width.saturating_sub(total),
             constraint.max.height.saturating_sub(total),
         );
-        let inner = self.child.layout(TuiConstraint::loose(inner_max), ctx);
+        let inner = self.child.layout(TuiConstraint::loose(inner_max), ctx, app);
         let size = TuiSize::new(
             inner.width.saturating_add(total),
             inner.height.saturating_add(total),
@@ -117,7 +122,14 @@ impl TuiElement for TuiContainer {
     }
 
     fn cursor_position(&self, area: TuiRect, ctx: &mut TuiLayoutContext) -> Option<(u16, u16)> {
-        self.child.cursor_position(area.inset(self.inset()), ctx)
+        // `cursor_position` is reported relative to `area`'s origin, but the
+        // child is laid out inside the inset rect and reports relative to that
+        // inset origin. Add the inset back so the cursor lands inside the
+        // border/padding instead of at the frame's top-left corner.
+        let inset = self.inset();
+        self.child
+            .cursor_position(area.inset(inset), ctx)
+            .map(|(cx, cy)| (cx.saturating_add(inset), cy.saturating_add(inset)))
     }
 
     fn dispatch_event(

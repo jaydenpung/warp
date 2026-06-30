@@ -162,6 +162,7 @@ use crate::util::openable_file_type::FileTarget;
 use crate::view_components::ToastFlavor;
 use crate::workflows::workflow::Workflow;
 use crate::workflows::{WorkflowSelectionSource, WorkflowSource, WorkflowType};
+use crate::workspace::tab_group::TabGroupId;
 use crate::workspace::{
     self, CommandSearchOptions, PaneViewLocator, TabBarLocation, WorkspaceAction,
 };
@@ -620,6 +621,9 @@ pub enum Event {
     /// as a header is dragged
     UpdateHoveredTabIndex {
         tab_hover_index: TabBarHoverIndex,
+        /// Drag cursor rect. The workspace uses it to resolve which tab group a
+        /// `BeforeTab` insertion lands.
+        drag_position: RectF,
     },
     /// Clears the hovered tab index so it no longer appears as highlighted drop target
     ClearHoveredTabIndex,
@@ -765,8 +769,24 @@ pub enum Event {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabBarHoverIndex {
-    BeforeTab(usize),
+    /// Insert the dragged pane as a new tab at `index`. `group` is the tab
+    /// group the insertion lands inside, so the new tab can inherit that
+    /// group's membership. `None` for an ungrouped insertion or a group
+    /// boundary (before/after a group). This is used to differentiate a drop
+    /// right before/after a group from a drop inside the group at its boundaries.
+    BeforeTab {
+        index: usize,
+        group: Option<TabGroupId>,
+    },
     OverTab(usize),
+}
+
+/// Axis of the tab bar a pane is being dragged over. Selects horizontal vs
+/// vertical-axis geometry when resolving the hovered insertion point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabBarAxis {
+    Horizontal,
+    Vertical,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1208,13 +1228,14 @@ impl PaneGroup {
                     origin,
                     tab_hover_index,
                     hidden_pane_preview_direction,
+                    drag_position,
                 } => {
                     if matches!(origin, ActionOrigin::Pane) {
                         // Clear hidden closed panes since dragging invalidates undo functionality
                         self.clear_hidden_closed_panes(ctx);
 
                         match tab_hover_index {
-                            TabBarHoverIndex::BeforeTab(_) => {
+                            TabBarHoverIndex::BeforeTab { .. } => {
                                 self.hide_pane_for_move(pane_id, ctx);
                             }
                             TabBarHoverIndex::OverTab(tab_idx) => {
@@ -1230,6 +1251,7 @@ impl PaneGroup {
 
                     ctx.emit(Event::UpdateHoveredTabIndex {
                         tab_hover_index: *tab_hover_index,
+                        drag_position: *drag_position,
                     })
                 }
 
@@ -2336,7 +2358,7 @@ impl PaneGroup {
 
         // Find terminal view via document -> conversation -> terminal view.
         let terminal_view = BlocklistAIHistoryModel::as_ref(ctx)
-            .terminal_view_id_for_conversation(&conversation_id)
+            .terminal_surface_id_for_conversation(&conversation_id)
             .and_then(|terminal_view_id| {
                 // Find the pane containing this terminal view.
                 self.pane_contents.keys().find_map(|pane_id| {
@@ -3139,7 +3161,7 @@ impl PaneGroup {
         conversation_id: AIConversationId,
         ctx: &AppContext,
     ) -> Option<EntityId> {
-        BlocklistAIHistoryModel::as_ref(ctx).terminal_view_id_for_conversation(&conversation_id)
+        BlocklistAIHistoryModel::as_ref(ctx).terminal_surface_id_for_conversation(&conversation_id)
     }
 
     fn pane_id_for_owned_conversation(
@@ -3586,7 +3608,7 @@ impl PaneGroup {
 
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, _ctx| {
                 history_model
-                    .mark_terminal_view_as_conversation_transcript_viewer(terminal_view.id());
+                    .mark_terminal_surface_as_conversation_transcript_viewer(terminal_view.id());
             });
 
             Self::terminal_pane_data(
@@ -3679,7 +3701,8 @@ impl PaneGroup {
         }
 
         BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, _ctx| {
-            history_model.mark_terminal_view_as_conversation_transcript_viewer(terminal_view.id());
+            history_model
+                .mark_terminal_surface_as_conversation_transcript_viewer(terminal_view.id());
         });
 
         if let Some(ref terminal_manager) = terminal_manager {
@@ -4447,7 +4470,7 @@ impl PaneGroup {
 
             // Preserve conversations from terminal views before cleaning up the pane
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, _| {
-                history_model.mark_conversations_historical_for_terminal_view(terminal_view_id);
+                history_model.mark_conversations_historical_for_terminal_surface(terminal_view_id);
             });
         }
 
@@ -4471,12 +4494,12 @@ impl PaneGroup {
         let history_handle = BlocklistAIHistoryModel::handle(ctx);
         let transfers: Vec<(AIConversationId, EntityId)> = history_handle
             .as_ref(ctx)
-            .all_live_conversations_for_terminal_view(closing_view_id)
+            .all_live_conversations_for_terminal_surface(closing_view_id)
             .filter_map(|conversation| {
                 let parent_id = conversation.parent_conversation_id()?;
                 let parent_owner = history_handle
                     .as_ref(ctx)
-                    .terminal_view_id_for_conversation(&parent_id)?;
+                    .terminal_surface_id_for_conversation(&parent_id)?;
                 if parent_owner == closing_view_id {
                     return None;
                 }
@@ -4551,7 +4574,7 @@ impl PaneGroup {
                     .conversation(conv_id)
                     .and_then(|c| c.parent_conversation_id())
                     .and_then(|parent_id| {
-                        history_model.terminal_view_id_for_conversation(&parent_id)
+                        history_model.terminal_surface_id_for_conversation(&parent_id)
                     })
                     .is_some_and(|tv_id| tv_id == parent_terminal_view_id)
             })
@@ -6090,7 +6113,8 @@ impl PaneGroup {
         });
 
         BlocklistAIHistoryModel::handle(ctx).update(ctx, |history_model, _ctx| {
-            history_model.mark_terminal_view_as_conversation_transcript_viewer(terminal_view.id());
+            history_model
+                .mark_terminal_surface_as_conversation_transcript_viewer(terminal_view.id());
         });
 
         // Register the transcript viewer as an ambient session so it appears in the Active section
@@ -6890,7 +6914,7 @@ impl PaneGroup {
         ctx: &AppContext,
     ) -> Option<PaneId> {
         let owner_view_id = BlocklistAIHistoryModel::as_ref(ctx)
-            .terminal_view_id_for_conversation(&conversation_id)?;
+            .terminal_surface_id_for_conversation(&conversation_id)?;
         for pane_id in self.pane_contents.keys() {
             if let Some(terminal_view) = self.terminal_view_from_pane_id(*pane_id, ctx) {
                 if terminal_view.id() == owner_view_id {
@@ -6920,7 +6944,7 @@ impl PaneGroup {
             // No owning pane in this group (e.g. the conversation lives
             // in another tab). Fall back to workspace-level navigation.
             if let Some(owner_view_id) = BlocklistAIHistoryModel::as_ref(ctx)
-                .terminal_view_id_for_conversation(&conversation_id)
+                .terminal_surface_id_for_conversation(&conversation_id)
             {
                 ctx.dispatch_typed_action(&WorkspaceAction::FocusTerminalViewInWorkspace {
                     terminal_view_id: owner_view_id,
@@ -7225,7 +7249,7 @@ impl PaneGroup {
     ) {
         let history_model = BlocklistAIHistoryModel::as_ref(ctx);
         let history_owner_view_id =
-            history_model.terminal_view_id_for_conversation(&conversation_id);
+            history_model.terminal_surface_id_for_conversation(&conversation_id);
         let conversation_in_memory = history_model.conversation(&conversation_id).is_some();
         let parent_id = history_model
             .conversation(&conversation_id)

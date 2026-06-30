@@ -364,10 +364,18 @@ fn pane_row_background(
     is_in_multi_selection: bool,
     is_hovered: bool,
     is_being_dragged: bool,
+    in_colored_group: bool,
     theme: &WarpTheme,
 ) -> Option<ThemeFill> {
     if let Some(color) = pane_color {
-        let opacity = if is_selected || is_hovered || is_in_multi_selection {
+        let is_highlighted = is_selected || is_hovered || is_in_multi_selection;
+        // Member of a colored group: the group container already paints this
+        // color behind the row at idle, so stay transparent at rest to avoid
+        // double-tinting that makes the row look lighter than the container.
+        if in_colored_group && !is_highlighted {
+            return None;
+        }
+        let opacity = if is_highlighted {
             TAB_COLOR_HOVER_OPACITY
         } else {
             TAB_COLOR_OPACITY
@@ -418,6 +426,7 @@ fn render_pane_row_element(
         is_in_multi_selection,
         is_in_multi_tab_selection,
         pane_color,
+        in_colored_group,
         badge_mouse_states: _,
         detail_hover_state,
         display_granularity: _,
@@ -450,6 +459,7 @@ fn render_pane_row_element(
             is_in_multi_selection,
             state.is_hovered(),
             is_being_dragged,
+            in_colored_group,
             theme,
         ) {
             container = container.with_background(background);
@@ -865,6 +875,10 @@ struct PaneProps<'a> {
     /// otherwise the single-pane menu.
     is_in_multi_tab_selection: bool,
     pane_color: Option<ThemeFill>,
+    /// True when this row is a member of a colored group whose container paints
+    /// the group color behind it. Suppresses the row's own idle color tint so it
+    /// blends into the container instead of double-tinting at rest.
+    in_colored_group: bool,
     badge_mouse_states: PaneRowBadgeMouseStates,
     detail_hover_state: VerticalTabsDetailHoverState,
     display_granularity: VerticalTabsDisplayGranularity,
@@ -1392,7 +1406,7 @@ const COMPACT_ICON_SIZE: f32 = 16.;
 const GROUP_INSERTION_TARGET_HEIGHT: f32 = 6.;
 const GROUP_INSERTION_INDICATOR_HEIGHT: f32 = 3.;
 
-fn any_workspace_pane_being_dragged(workspace: &Workspace, app: &AppContext) -> bool {
+pub(super) fn any_workspace_pane_being_dragged(workspace: &Workspace, app: &AppContext) -> bool {
     workspace
         .tabs
         .iter()
@@ -1447,12 +1461,42 @@ fn render_vertical_tab_hover_indicator(theme: &WarpTheme) -> Box<dyn Element> {
     .finish()
 }
 
-fn render_vertical_tab_insertion_target_content(content: Box<dyn Element>) -> Box<dyn Element> {
+/// Whether the active drag resolves to an insertion at `insert_index` joining
+/// `expected_group`. Each boundary renders its own indicator with the group it
+/// represents, so the before-group (`None`), into-group (`Some`), and
+/// after-group indicators never collide even though several share an index.
+/// Shared by the vertical and horizontal tab bars.
+pub(super) fn show_before_indicator(
+    hovered_tab_index: Option<TabBarHoverIndex>,
+    insert_index: usize,
+    expected_group: Option<TabGroupId>,
+) -> bool {
+    hovered_tab_index
+        == Some(TabBarHoverIndex::BeforeTab {
+            index: insert_index,
+            group: expected_group,
+        })
+}
+
+/// Insertion indicator line shown between rows during a pane drag. `group`
+/// insets it to the group's member indentation so an in-group drop reads
+/// differently from an ungrouped drop between tabs/groups. Indicator only: drop
+/// hit-testing is handled by the per-row, group-header, and panel catch-all
+/// `DropTarget`s, with the insertion point resolved from cursor geometry.
+fn render_vertical_tab_insertion_target(
+    group: Option<TabGroupId>,
+    theme: &WarpTheme,
+) -> Box<dyn Element> {
+    let left_padding = if group.is_some() {
+        GROUP_HORIZONTAL_PADDING + TAB_GROUP_MEMBER_INDENT
+    } else {
+        GROUP_HORIZONTAL_PADDING
+    };
     ConstrainedBox::new(
-        Container::new(content)
+        Container::new(render_vertical_tab_hover_indicator(theme))
             .with_padding(
                 Padding::uniform(0.)
-                    .with_left(GROUP_HORIZONTAL_PADDING)
+                    .with_left(left_padding)
                     .with_right(GROUP_HORIZONTAL_PADDING),
             )
             .finish(),
@@ -1461,39 +1505,15 @@ fn render_vertical_tab_insertion_target_content(content: Box<dyn Element>) -> Bo
     .finish()
 }
 
-fn render_vertical_tab_insertion_target(
-    insert_index: usize,
-    tab_count: usize,
-    is_drag_target: bool,
-    theme: &WarpTheme,
-) -> Box<dyn Element> {
-    let content = if is_drag_target {
-        render_vertical_tab_hover_indicator(theme)
-    } else {
-        Empty::new().finish()
-    };
-
-    DropTarget::new(
-        render_vertical_tab_insertion_target_content(content),
-        VerticalTabsPaneDropTargetData {
-            tab_bar_location: vertical_tabs_tab_bar_location(insert_index, tab_count),
-            tab_hover_index: TabBarHoverIndex::BeforeTab(insert_index),
-        },
-    )
-    .finish()
-}
-
 fn add_vertical_tab_insertion_target_overlay(
     stack: &mut Stack,
-    insert_index: usize,
-    tab_count: usize,
-    is_drag_target: bool,
+    group: Option<TabGroupId>,
     parent_anchor: ParentAnchor,
     child_anchor: ChildAnchor,
     theme: &WarpTheme,
 ) {
     stack.add_positioned_overlay_child(
-        render_vertical_tab_insertion_target(insert_index, tab_count, is_drag_target, theme),
+        render_vertical_tab_insertion_target(group, theme),
         OffsetPositioning::offset_from_parent(
             vec2f(0., 0.),
             ParentOffsetBounds::ParentBySize,
@@ -1981,6 +2001,24 @@ fn render_vertical_tabs_panel(
         .with_child(render_color_filter_bar(state, workspace, app))
         .finish();
 
+    // Catch-all drop target so a pane dragged into any gap not covered by a
+    // row, group-header, or member target (between groups, below the last tab)
+    // resolves to "after the last tab" instead of no target (which un-hides the
+    // dragged pane and reflows the list). The framework's smallest-area
+    // hit-test keeps the inner row targets winning where they overlap.
+    let panel_content: Box<dyn Element> = if any_workspace_pane_being_dragged(workspace, app) {
+        let tab_count = workspace.tabs.len();
+        DropTarget::new(
+            panel_content,
+            VerticalTabsPaneDropTargetData {
+                tab_bar_location: vertical_tabs_tab_bar_location(tab_count, tab_count),
+            },
+        )
+        .finish()
+    } else {
+        panel_content
+    };
+
     // The settings popup is rendered at the workspace level (with Dismiss for click-outside-
     // to-close). Rendering it here again shares MouseStateHandle instances across two Hoverable
     // trees; click_count.take() is consumed by this copy first, leaving the workspace copy
@@ -2250,7 +2288,10 @@ fn render_groups(
             }
             None => {
                 let insert_before_index = tab_index;
-                let insert_after_index = (i == total_visible - 1).then_some(tab_index + 1);
+                // Gaps between tabs are covered by the next tab's before-indicator,
+                // and the area after the last tab by the trailing indicator below,
+                // so an ungrouped row doesn't render its own "after" indicator.
+                let insert_after_index = None;
                 groups.add_child(render_tab_group(
                     state,
                     workspace,
@@ -2272,6 +2313,14 @@ fn render_groups(
     // Ghost after all tab groups (fencepost).
     if ghost_insertion_index == Some(workspace.tabs.len()) {
         groups.add_child(render_ghost_vertical_tab_slot(workspace, app));
+    }
+
+    // Trailing indicator for an ungrouped insertion after the last tab/group
+    // (the drop itself is resolved by the panel catch-all).
+    if is_any_pane_dragging
+        && show_before_indicator(workspace.hovered_tab_index, workspace.tabs.len(), None)
+    {
+        groups.add_child(render_vertical_tab_insertion_target(None, theme));
     }
 
     // Prune stale badge mouse states for panes that no longer exist.
@@ -2417,8 +2466,23 @@ fn render_tab_group_internal(
     // Captured into row/group right-click closures so they can pick between
     // the single-pane menu and the multi-tab selection menu.
     let is_in_multi_tab_selection = workspace.is_tab_in_multi_tab_selection(tab_index);
-    let color_mode = compute_tab_group_color_mode(tab, pane_group, &visible_pane_ids, theme, app);
+    let tab_group_for_color = tab.group_id.and_then(|gid| workspace.tab_groups.get(&gid));
+    let color_mode = compute_tab_group_color_mode(
+        tab,
+        pane_group,
+        &visible_pane_ids,
+        theme,
+        tab_group_for_color,
+        app,
+    );
     let per_pane_colors = color_mode.into_per_pane_colors(&visible_pane_ids);
+    // Members of a colored group blend into the group container's colored
+    // background; suppress each member row's own idle color tint so it doesn't
+    // double-tint on top of the container at rest.
+    let in_colored_group = in_tab_group
+        && tab_group_for_color
+            .and_then(|group| group.color.resolve(None))
+            .is_some();
     let is_being_renamed = is_active && workspace.current_workspace_state.is_tab_being_renamed();
     let rename_editor = workspace.tab_rename_editor.clone();
     let has_custom_title = pane_group.custom_title(app).is_some();
@@ -2491,7 +2555,7 @@ fn render_tab_group_internal(
                     }
                     handles[..branch_line_count].to_vec()
                 };
-                let Some(pane_props) = PaneProps::new(
+                let Some(mut pane_props) = PaneProps::new(
                     pane_group,
                     *pane_id,
                     pane_group_id,
@@ -2520,6 +2584,7 @@ fn render_tab_group_internal(
                 ) else {
                     return Empty::new().finish();
                 };
+                pane_props.in_colored_group = in_colored_group;
                 rows.add_child(render_summary_tab_item(
                     pane_props,
                     summary
@@ -2585,6 +2650,7 @@ fn render_tab_group_internal(
                         is_last: row_idx + 1 == total_rows,
                     };
                 }
+                pane_props.in_colored_group = in_colored_group;
                 let view_mode = *TabSettings::as_ref(app).vertical_tabs_view_mode.value();
                 let row = match view_mode {
                     VerticalTabsViewMode::Compact => render_compact_pane_row(pane_props, app),
@@ -2633,15 +2699,16 @@ fn render_tab_group_internal(
                 ThemeFill::Solid(ColorU::transparent_black())
             };
             let mut container = Container::new(group.finish()).with_background(background);
-            if is_drag_target {
-                container = container.with_border(
-                    Border::all(1.).with_border_fill(ThemeFill::Solid(theme.accent().into())),
-                );
-            } else if has_top_border || is_first_tab || is_last_tab {
+            if has_top_border || is_first_tab || is_last_tab {
                 container = container.with_border(
                     Border::new(1.)
                         .with_sides(has_top_border || is_first_tab, false, is_last_tab, false)
                         .with_border_fill(internal_colors::fg_overlay_1(theme)),
+                );
+            }
+            if is_drag_target {
+                container = container.with_foreground_border(
+                    Border::all(1.).with_border_fill(ThemeFill::Solid(theme.accent().into())),
                 );
             }
             container.finish()
@@ -2672,13 +2739,13 @@ fn render_tab_group_internal(
                 container = container
                     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)));
             }
-            if is_drag_target {
-                container = container.with_border(
-                    Border::all(1.).with_border_fill(ThemeFill::Solid(theme.accent().into())),
-                );
-            }
             if needs_action_button_band {
                 container = container.with_margin_top(action_button_band);
+            }
+            if is_drag_target {
+                container = container.with_foreground_border(
+                    Border::all(1.).with_border_fill(ThemeFill::Solid(theme.accent().into())),
+                );
             }
             container.finish()
         };
@@ -2704,27 +2771,36 @@ fn render_tab_group_internal(
         };
         let mut stack = Stack::new().with_child(group_content);
         if drag_state.is_any_pane_dragging {
-            add_vertical_tab_insertion_target_overlay(
-                &mut stack,
+            // This row only shows indicators for insertions joining its own group
+            // (`tab.group_id`); the before-group indicator (group `None`) is
+            // rendered above the group container instead.
+            if show_before_indicator(
+                workspace.hovered_tab_index,
                 drag_state.insert_before_index,
-                workspace.tabs.len(),
-                workspace.hovered_tab_index
-                    == Some(TabBarHoverIndex::BeforeTab(drag_state.insert_before_index)),
-                ParentAnchor::TopLeft,
-                ChildAnchor::TopLeft,
-                theme,
-            );
-            if let Some(insert_after_index) = drag_state.insert_after_index {
+                tab.group_id,
+            ) {
                 add_vertical_tab_insertion_target_overlay(
                     &mut stack,
-                    insert_after_index,
-                    workspace.tabs.len(),
-                    workspace.hovered_tab_index
-                        == Some(TabBarHoverIndex::BeforeTab(insert_after_index)),
-                    ParentAnchor::BottomLeft,
-                    ChildAnchor::BottomLeft,
+                    tab.group_id,
+                    ParentAnchor::TopLeft,
+                    ChildAnchor::TopLeft,
                     theme,
                 );
+            }
+            if let Some(insert_after_index) = drag_state.insert_after_index {
+                if show_before_indicator(
+                    workspace.hovered_tab_index,
+                    insert_after_index,
+                    tab.group_id,
+                ) {
+                    add_vertical_tab_insertion_target_overlay(
+                        &mut stack,
+                        tab.group_id,
+                        ParentAnchor::BottomLeft,
+                        ChildAnchor::BottomLeft,
+                        theme,
+                    );
+                }
             }
         }
         // Pane view inside a tab group: the group container adds
@@ -2853,7 +2929,6 @@ fn render_tab_group_internal(
             draggable,
             VerticalTabsPaneDropTargetData {
                 tab_bar_location: TabBarLocation::TabIndex(tab_index),
-                tab_hover_index: TabBarHoverIndex::OverTab(tab_index),
             },
         )
         .finish()
@@ -3177,6 +3252,12 @@ fn render_grouped_tabs_header(
         .with_child(action_buttons)
         .finish();
 
+    // Resolve the group's color so the header tints to match its member tabs.
+    let group_color_fill: Option<ThemeFill> = group
+        .color
+        .resolve(None)
+        .map(|c| c.to_ansi_color(&theme.terminal_colors().normal).into());
+
     let mut hoverable = Hoverable::new(mouse_states.header.clone(), move |state| {
         let border_fill = if is_header_selected {
             internal_colors::fg_overlay_3(theme)
@@ -3187,7 +3268,15 @@ fn render_grouped_tabs_header(
             .with_padding(Padding::uniform(GROUP_HORIZONTAL_PADDING))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)))
             .with_border(Border::all(1.).with_border_fill(border_fill));
-        if is_header_selected || state.is_hovered() {
+        if let Some(color) = group_color_fill {
+            // Colored group: the group container paints the idle color behind the
+            // header, so only tint on hover/selected. Painting the idle color
+            // here too would double-tint and make the header look a shade lighter
+            // than the container.
+            if is_header_selected || state.is_hovered() {
+                container = container.with_background(color.with_opacity(TAB_COLOR_HOVER_OPACITY));
+            }
+        } else if is_header_selected || state.is_hovered() {
             container = container.with_background(internal_colors::fg_overlay_2(theme));
         }
         let header = container.finish();
@@ -3242,8 +3331,9 @@ fn render_grouped_tabs_header(
     hoverable.finish()
 }
 
-/// Renders a tab group: pane-like header followed by indented member rows. Background only paints
-/// on hover or when a member is active.
+/// Renders a tab group: pane-like header followed by indented member rows. A colored group fills
+/// the container with the group color so the header and member rows blend into one colored block; an
+/// uncolored group only paints its background on hover or when a member is active.
 fn render_grouped_tab_container(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
@@ -3270,6 +3360,7 @@ fn render_grouped_tab_container(
         .iter()
         .any(|(tab_index, _)| *tab_index == workspace.active_tab_index);
     let is_collapsed = group.collapsed;
+    let first_member_index = members.first().map(|(index, _)| *index).unwrap_or(0);
 
     let resolved_mode = resolve_vertical_tabs_mode(app);
     let needs_outer_horizontal_padding = uses_outer_group_container(match resolved_mode {
@@ -3306,7 +3397,7 @@ fn render_grouped_tab_container(
         // subtitle, shown whether the group is collapsed or expanded (replacing
         // the plain "N tabs" count whenever any member tab is colored).
         let color_counts = Some(compute_group_color_counts(workspace, members));
-        content.add_child(render_grouped_tabs_header(
+        let header = render_grouped_tabs_header(
             &group,
             member_count,
             &mouse_states,
@@ -3318,7 +3409,38 @@ fn render_grouped_tab_container(
             collapsed_member_kinds.as_deref(),
             color_counts,
             app,
-        ));
+        );
+        // While a pane is being dragged, the group header is a drop zone for the
+        // space above the first member. What a drop there does depends on whether
+        // the group is collapsed:
+        //
+        // - Collapsed: the members are hidden, so there's nothing to drop *into*.
+        //   The only sensible result is to land the pane just above the whole
+        //   group, so `AfterTabIndex(first)` always inserts at the group's first
+        //   slot (directly above it), no matter where in the header the cursor is.
+        //   Dropping just below a collapsed group is the next tab/group's job, so
+        //   we don't handle it here.
+        // - Expanded: the first member is visible, so the drop should follow the
+        //   cursor: above the group near the top of the header, or into the group
+        //   as its new first member lower down. `TabIndex(first)` enables that by
+        //   testing the cursor against the first member's row.
+        let header = if is_any_pane_dragging {
+            let header_location = if is_collapsed {
+                TabBarLocation::AfterTabIndex(first_member_index)
+            } else {
+                TabBarLocation::TabIndex(first_member_index)
+            };
+            DropTarget::new(
+                header,
+                VerticalTabsPaneDropTargetData {
+                    tab_bar_location: header_location,
+                },
+            )
+            .finish()
+        } else {
+            header
+        };
+        content.add_child(header);
 
         // Collapsed groups hide member rows in the panel chrome; the members remain in `workspace.tabs`.
         if !is_collapsed {
@@ -3376,14 +3498,18 @@ fn render_grouped_tab_container(
 
         // Pane view: uniform `GROUP_HORIZONTAL_PADDING` matches ungrouped-tab body padding.
         // Tab view: only apply bottom padding when expanded so a collapsed group has no trailing band.
+        // Expanded tab grou[s] have equal padding on the bottom and right edge.
         let mut padding = Padding::uniform(0.);
         if needs_outer_horizontal_padding {
             padding = Padding::uniform(GROUP_HORIZONTAL_PADDING);
+            if !is_collapsed {
+                padding = padding.with_bottom(GROUP_HORIZONTAL_PADDING + TAB_GROUP_CONTENT_INSET);
+            }
         } else if !is_collapsed {
             padding = padding.with_bottom(TAB_GROUP_CONTENT_INSET);
         }
 
-        Container::new(content.finish())
+        let container = Container::new(content.finish())
             .with_padding(padding)
             .with_background(background)
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_CORNER_RADIUS)))
@@ -3391,7 +3517,26 @@ fn render_grouped_tab_container(
                 Border::left(TAB_GROUP_SPINE_WIDTH)
                     .with_border_fill(ThemeFill::Solid(spine_color)),
             )
-            .finish()
+            .finish();
+        // Before-group indicator: above the header when an ungrouped pane is
+        // inserted before this group (between groups / before the first group).
+        // Distinct from the into-group indicator above the first tab in the group,
+        // which carries this group's id instead of `None`.
+        if is_any_pane_dragging
+            && show_before_indicator(workspace.hovered_tab_index, first_member_index, None)
+        {
+            let mut stack = Stack::new().with_child(container);
+            add_vertical_tab_insertion_target_overlay(
+                &mut stack,
+                None,
+                ParentAnchor::TopLeft,
+                ChildAnchor::TopLeft,
+                theme,
+            );
+            stack.finish()
+        } else {
+            container
+        }
     })
     // Right-click on group chrome (not member rows) opens the group menu.
     .on_right_click(move |ctx, _, position| {
@@ -4062,6 +4207,7 @@ impl<'a> PaneProps<'a> {
             is_in_multi_selection,
             is_in_multi_tab_selection,
             pane_color: pane_row_state.pane_color,
+            in_colored_group: false,
             badge_mouse_states: pane_row_state.badge_mouse_states,
             detail_hover_state,
             display_granularity,
@@ -5785,11 +5931,17 @@ fn render_pull_request_badge_content(label: &str, appearance: &Appearance) -> Bo
         .finish()
 }
 
+/// Resolves the rendered color mode for a tab's panes. A tab with a manual
+/// `selected_color` is colored uniformly with that color — group membership does
+/// not override a member's own color (a group's color is surfaced via the group
+/// spine and the header color summary instead). Otherwise it falls through to
+/// per-pane directory colors.
 fn compute_tab_group_color_mode(
     tab: &TabData,
     pane_group: &PaneGroup,
     visible_pane_ids: &[PaneId],
     theme: &WarpTheme,
+    _tab_group: Option<&TabGroup>,
     app: &AppContext,
 ) -> TabGroupColorMode {
     // Manual override applies to the whole group.

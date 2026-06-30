@@ -476,11 +476,11 @@ fn wire_up_terminal_view_session_sharing(
         move |_, event, ctx| {
             match event {
                 BlocklistAIHistoryEvent::UpdatedStreamingExchange {
-                    terminal_view_id,
+                    terminal_surface_id,
                     conversation_id,
                     ..
                 } => {
-                    if *terminal_view_id != view_id_for_stream_init {
+                    if *terminal_surface_id != view_id_for_stream_init {
                         return;
                     }
 
@@ -517,8 +517,10 @@ fn wire_up_terminal_view_session_sharing(
                         ctx,
                     );
                 }
-                BlocklistAIHistoryEvent::UpdatedAutoexecuteOverride { terminal_view_id } => {
-                    if *terminal_view_id != view_id_for_stream_init {
+                BlocklistAIHistoryEvent::UpdatedAutoexecuteOverride {
+                    terminal_surface_id,
+                } => {
+                    if *terminal_surface_id != view_id_for_stream_init {
                         return;
                     }
 
@@ -555,10 +557,10 @@ fn wire_up_terminal_view_session_sharing(
                 // `UpdateSourceType` upstream message) until they
                 // reconnect.
                 BlocklistAIHistoryEvent::ConversationServerTokenAssigned {
-                    terminal_view_id,
+                    terminal_surface_id,
                     conversation_id,
                 } => {
-                    if *terminal_view_id != view_id_for_stream_init {
+                    if *terminal_surface_id != view_id_for_stream_init {
                         return;
                     }
 
@@ -626,7 +628,7 @@ impl TerminalManager<TerminalView> {
         // Get all conversations for this terminal view
         // Any conversation could be continued during session sharing
         let conversations: Vec<AIConversation> = BlocklistAIHistoryModel::as_ref(ctx)
-            .all_live_conversations_for_terminal_view(terminal_view.id())
+            .all_live_conversations_for_terminal_surface(terminal_view.id())
             .filter(|conv| conv.exchange_count() > 0)
             .cloned()
             .collect();
@@ -715,7 +717,7 @@ impl TerminalManager<TerminalView> {
         if matches!(source.source_type, SessionSourceType::AmbientAgent { .. }) {
             let terminal_view_id = terminal_view.id();
             BlocklistAIHistoryModel::handle(ctx).update(ctx, |history, _ctx| {
-                history.mark_terminal_view_as_ambient_agent_session_view(terminal_view_id);
+                history.mark_terminal_surface_as_ambient_agent_session_view(terminal_view_id);
             });
         }
 
@@ -1373,9 +1375,10 @@ impl TerminalManager<TerminalView> {
 
                 // Execute the agent prompt in the Oz-harness case
                 terminal_view.update(ctx, |view, ctx| {
-                    // Clear the sharer's input (as the prompt in the input is now being executed)
+                    // Restore the sharer's frozen visual state. The buffer is cleared by
+                    // system_clear_buffer when SentRequest fires from execute_agent_prompt_for_shared_session.
                     view.input().update(ctx, |input, ctx| {
-                        input.unfreeze_and_clear_agent_input(ctx);
+                        input.unfreeze_agent_input(false, ctx);
                     });
 
                     view.ai_controller().update(ctx, |ai_controller, ctx| {
