@@ -23633,20 +23633,7 @@ impl TypedActionView for Workspace {
                 );
             }
             SetActiveTabName(name) => self.set_active_tab_name(name, ctx),
-            SetActiveTabColor(color) => {
-                // When the active tab is in a group, redirect to the group's color.
-                // The tab color selection menu is hidden when a tab is part of a group
-                // this handles the case where a tab color is set via a slash command.
-                let active_group_id = self
-                    .tabs
-                    .get(self.active_tab_index)
-                    .and_then(|t| t.group_id);
-                if let Some(group_id) = active_group_id {
-                    self.set_tab_group_color(group_id, *color, ctx);
-                } else {
-                    self.set_tab_color(self.active_tab_index, *color, ctx);
-                }
-            }
+            SetActiveTabColor(color) => self.set_tab_color(self.active_tab_index, *color, ctx),
             ToggleTabRightClickMenu { tab_index, anchor } => {
                 self.toggle_tab_right_click_menu(*tab_index, *anchor, ctx)
             }

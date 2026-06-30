@@ -2476,13 +2476,11 @@ fn render_tab_group_internal(
         app,
     );
     let per_pane_colors = color_mode.into_per_pane_colors(&visible_pane_ids);
-    // Members of a colored group blend into the group container's colored
-    // background; suppress each member row's own idle color tint so it doesn't
-    // double-tint on top of the container at rest.
-    let in_colored_group = in_tab_group
-        && tab_group_for_color
-            .and_then(|group| group.color.resolve(None))
-            .is_some();
+    // Our group container paints a neutral card (the group's own color shows as
+    // the left spine), not a color fill behind member rows. So each member row
+    // must paint its own idle color tint — never suppress it, or a colored
+    // member would only show its color on hover.
+    let in_colored_group = false;
     let is_being_renamed = is_active && workspace.current_workspace_state.is_tab_being_renamed();
     let rename_editor = workspace.tab_rename_editor.clone();
     let has_custom_title = pane_group.custom_title(app).is_some();

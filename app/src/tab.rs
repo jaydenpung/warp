@@ -655,10 +655,6 @@ impl TabData {
         index: usize,
         terminal_colors: AnsiColors,
     ) -> Vec<MenuItem<WorkspaceAction>> {
-        // Tabs inside a group have their color controlled by the group.
-        if self.group_id.is_some() {
-            return vec![];
-        }
         if FeatureFlag::DirectoryTabColors.is_enabled() {
             color_picker_menu_items(
                 self.color(),
