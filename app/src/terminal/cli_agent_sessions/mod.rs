@@ -228,9 +228,22 @@ impl CLIAgentSession {
                 self.clear_permission_scoped_state();
                 CLIAgentSessionStatus::InProgress
             }
-            // IdlePrompt means the agent is sitting at its prompt waiting for input.
-            // This should not affect status — otherwise it would override Success after a Stop event.
-            CLIAgentEventType::IdlePrompt => return None,
+            // IdlePrompt means the agent is sitting at its prompt waiting for input —
+            // it is definitively no longer working. Normally a `Stop` event has already
+            // moved us to `Success` and this is a no-op. But the `Stop` event can be
+            // missed (e.g. the plugin suppresses it under `stop_hook_active`, or the OSC
+            // sequence never reaches the PTY), which would otherwise pin the session at
+            // `InProgress` forever. Treat IdlePrompt as a recovery signal: resolve a
+            // stuck `InProgress` to `Success`. Only act on `InProgress` so we never
+            // override an existing `Success`, nor a `Blocked` state (e.g. a pending
+            // question or permission the user still needs to answer).
+            CLIAgentEventType::IdlePrompt => {
+                if matches!(self.status, CLIAgentSessionStatus::InProgress) {
+                    CLIAgentSessionStatus::Success
+                } else {
+                    return None;
+                }
+            }
             CLIAgentEventType::SessionStart => {
                 self.plugin_version = event.payload.plugin_version.clone();
                 return None;

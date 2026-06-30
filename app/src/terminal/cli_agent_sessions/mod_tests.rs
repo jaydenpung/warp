@@ -697,3 +697,83 @@ fn permission_request_still_populates_summary_and_tool_fields() {
         CLIAgentSessionStatus::Blocked { .. },
     ));
 }
+
+/// Builds a Claude session in the given status with no permission-scoped state,
+/// used by the IdlePrompt recovery tests below.
+fn claude_session_with_status(status: CLIAgentSessionStatus) -> CLIAgentSession {
+    CLIAgentSession {
+        agent: CLIAgent::Claude,
+        status,
+        session_context: CLIAgentSessionContext::default(),
+        input_state: CLIAgentInputState::Closed,
+        should_auto_toggle_input: false,
+        listener: None,
+        plugin_version: None,
+        draft_text: None,
+        remote_host: None,
+        custom_command_prefix: None,
+        received_rich_notification: true,
+    }
+}
+
+fn idle_prompt_event() -> CLIAgentEvent {
+    CLIAgentEvent {
+        source: CLIAgentEventSource::RichPlugin,
+        v: 1,
+        agent: CLIAgent::Claude,
+        event: CLIAgentEventType::IdlePrompt,
+        session_id: Some("abc".to_owned()),
+        cwd: None,
+        project: None,
+        payload: CLIAgentEventPayload {
+            summary: Some("Claude is waiting for your input".to_owned()),
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn idle_prompt_recovers_stuck_in_progress_to_success() {
+    // If the `Stop` event is missed (e.g. the plugin suppresses it under
+    // `stop_hook_active`, or the OSC never reaches the PTY), the session would
+    // be pinned at InProgress. The following IdlePrompt — emitted once the agent
+    // sits at its prompt — must resolve it to Success so the tab stops showing
+    // an in-progress spinner forever.
+    let mut session = claude_session_with_status(CLIAgentSessionStatus::InProgress);
+
+    let new_status = session.apply_event(&idle_prompt_event());
+
+    assert!(matches!(new_status, Some(CLIAgentSessionStatus::Success)));
+    assert!(matches!(session.status, CLIAgentSessionStatus::Success));
+}
+
+#[test]
+fn idle_prompt_does_not_override_success() {
+    // The common case: a `Stop` event already moved the session to Success and
+    // the trailing IdlePrompt must be a no-op rather than re-firing a status
+    // change.
+    let mut session = claude_session_with_status(CLIAgentSessionStatus::Success);
+
+    let new_status = session.apply_event(&idle_prompt_event());
+
+    assert!(new_status.is_none());
+    assert!(matches!(session.status, CLIAgentSessionStatus::Success));
+}
+
+#[test]
+fn idle_prompt_does_not_override_blocked() {
+    // A Blocked session is waiting on the user (a pending question or
+    // permission). IdlePrompt reflects that same wait and must not mark it
+    // complete.
+    let mut session = claude_session_with_status(CLIAgentSessionStatus::Blocked {
+        message: Some("Waiting for your answer".to_owned()),
+    });
+
+    let new_status = session.apply_event(&idle_prompt_event());
+
+    assert!(new_status.is_none());
+    assert!(matches!(
+        session.status,
+        CLIAgentSessionStatus::Blocked { .. },
+    ));
+}
